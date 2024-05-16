@@ -15,6 +15,8 @@ ucPrinterComboExPackage.twinproj - Project configured to build as .twinpack
 
 ucPrinterComboEx.twinpack - twinBASIC Package form suitable to import into tB projects.
 
+ucPrinterComboEx.tbcontrol/.twin - Raw twinBASIC source files for control. Can be imported into projects or the .twin file browsed here for the source.
+
 The VB6 folder contains all files for that version, except for the associated typelibs oleexp.tlb and OLEGuids.tlb, which are available from:\
 [[VB6] Modern Shell Interface Type Library - oleexp.tlb](http://www.vbforums.com/showthread.php?786079)\
 [CommonControls (Replacement of the MS common controls)](https://www.vbforums.com/showthread.php?698563-CommonControls-(Replacement-of-the-MS-common-controls))
