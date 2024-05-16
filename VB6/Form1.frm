@@ -21,22 +21,23 @@ Begin VB.Form Form1
    ScaleHeight     =   2340
    ScaleWidth      =   6030
    StartUpPosition =   3  'Windows Default
+   Begin ucPrinterComboExTest.ucPrinterComboEx ucPrinterComboEx1 
+      Height          =   360
+      Left            =   960
+      TabIndex        =   1
+      Top             =   1320
+      Width           =   4335
+      _extentx        =   6376
+      _extenty        =   873
+      combostyle      =   1
+   End
    Begin VB.CommandButton Command1 
       Caption         =   "Show Info"
       Height          =   375
       Left            =   1800
-      TabIndex        =   1
+      TabIndex        =   0
       Top             =   480
       Width           =   1935
-   End
-   Begin ucPrinterComboExTest.ucPrinterComboEx ucPrinterComboEx1 
-      Height          =   360
-      Left            =   1080
-      TabIndex        =   0
-      Top             =   1440
-      Width           =   3975
-      _ExtentX        =   7011
-      _ExtentY        =   635
    End
 End
 Attribute VB_Name = "Form1"

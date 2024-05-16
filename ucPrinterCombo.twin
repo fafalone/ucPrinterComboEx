@@ -1,0 +1,2780 @@
+[Description("Extended Printer ComboBox Control")]
+[FormDesignerId("276C6457-B8DE-4D60-9363-54F71CB85677")]
+[ClassId("50678867-FAE6-4C6F-9D2F-FACBB9C07C71")]
+[InterfaceId("AF77E2CB-CA21-47FE-8DD0-95228EB7156E")]
+[EventInterfaceId("315BD58B-BDCF-4560-8233-F8DFB5F6E330")]
+[COMControl]
+Class ucPrinterComboEx
+
+Option Explicit
+
+'********************************************************************
+' ucPrinterCombo v1.0 ***BETA 2***
+' by Jon Johnson (fafalone)
+' https://github.com/fafalone/ucPrinterComboEx
+'
+' This control is designed to display a list of printers as both a 
+' normal ComboBoxEx (or ImageCombo), with a single line and small 
+' icons, and a large-icon double-line view found in many other printer
+' selection dialogs today.
+'
+' The large icon view is done by substituting a ListView in tile view
+' for the normal ListBox, and accordingly is controlled by the option
+' UseListView, default True. 
+'
+' Requirements: 
+'    All versions:
+'       -Windows Vista or newer
+'       -Common Controls 6.0 Manifest
+'    twinBASIC version:
+'       -Windows Development Library for twinBASIC v7.6+
+'       -ucPrinterComboEx.tbcontrol/.twin
+'    VB6 version:
+'       -oleexp v6.0+
+'       -mIID.bas (copy included)
+'       -ucPrinterComboEx.ctl/.ctx
+'       -mUCPrinterComboExHelper.bas
+'    OCX: No additional requirements.
+'
+' Changelog:
+'    v1.0 BETA 2
+'       -Added keyboard support via Krool's IPAO hooks
+'       -Added GetPrinterPicture and GetPrinterBitmap
+'       -Default back color is now white like the control defaults
+'       -Added BackColorListView to control that independently
+'       -(Bug fix) ListView was not opening above when below didn't 
+'                  have enough space.
+'       -(Bug fix) Bottom of control cut off after font change.
+'       -
+'********************************************************************
+Private Const dbg_PrintToImmediate As Boolean = False 'This control has very extensive debug information, you may not want
+                                                      'to see that in your IDE.
+Private Const dbg_IncludeDate As Boolean = False 'Prefix all Debug output with the date and time, [yyyy-mm-dd Hh:Mm:Ss]
+Private Const dbg_IncludeName As Boolean = True 'Include Ambient.Name
+Private Const dbg_dtFormat As String = "yyyy-mm-dd Hh:nn:Ss"
+Private Const dbg_VerbosityLevel As Long = 3   'Only log to immediate/file messages <= this level
+
+
+
+Implements IObjectSafety
+Implements IOleInPlaceActiveObjectVB
+
+
+Public Event PrinterChanged(ByVal sNewPrinterName As String, ByVal sParsingPath As String, ByVal sModelName As String, ByVal sNetworkLocation As String, ByVal sLastStatusMessage As String, ByVal bIsDefaultPrinter As Boolean)
+Attribute PrinterChanged.VB_MemberFlags = "200"
+Public Event DropdownOpen()
+Public Event DropdownClose()
+
+    
+Private mInit As Boolean
+Private hShell32 As LongPtr
+ 
+Private hCombo As LongPtr
+Private hComboEd As LongPtr
+Private hComboCB As LongPtr
+Private hComboLB As LongPtr
+Private hComboIMC As LongPtr
+Private hLVW As LongPtr, bLVVis As Boolean
+Private hFont As LongPtr, hFontBold As LongPtr
+Private WithEvents PropFont As StdFont
+Private mIFMain As IFont
+Private hParOrig As LongPtr
+Private pImlSmall As IImageList, himlSmall As LongPtr
+Private pImlLarge As IImageList, himlLarge As LongPtr
+Private himlMain As LongPtr
+Private Type SysImgCacheEntry
+    sysimlid As Long
+    limlidx As Long
+End Type
+Private SysImgCache() As SysImgCacheEntry
+Private nSysImgCache As Long
+Private bOvrAdded(16) As Boolean
+Private hTheme As LongPtr
+Private mLastHT As Long
+
+Private mMouseDown As Boolean 'Tracked by LV drop only
+Private bFlagSuppressReopen As Boolean
+Private UCNoSetFocusFwd As Boolean
+
+Private mDPI As Single
+Private mActualZoom As Single 'Get actual DPI even if virtualized
+Private IsComCtl6 As Boolean
+Private smCXEdge As Long, smCYEdge As Long
+
+
+Private Const sCol0 = "Name"
+Private Const sCol1 = "Status"
+
+Private Type tPrinter
+    sName As String
+    sParsingPath As String
+    sInfoTip As String
+    sModel As String
+    sLocation As String
+    sLastStatus As String
+    nIcon As Long
+    nIconLV As Long
+    nOvr As Long
+    lvi As Long
+    cbi As Long
+    bDefault As Boolean
+End Type
+Private mPrinters() As tPrinter
+Private nPr As Long
+Private mPrintersOld() As tPrinter
+Private nPrOld As Long
+Private mIdxDef As Long
+Private mIdxSel As Long
+Private mIdxSelPrev As Long
+Private mLabelSel As String
+Private mLabelSelPrev As String
+
+Private mRaiseOnLoad As Boolean
+Private Const mDefRaiseOnLoad As Boolean = True
+
+Private cyList As Long
+Private Const mDefCY As Long = 800
+
+Private cxList As Long
+Private Const mDefCX As Long = 0 'scaLed by DPI in UC_Init
+
+Private cxyIcon As Long
+Private Const mDefIcon As Long = 32
+
+Private mNotify As Boolean
+Private Const mDefNotify As Boolean = True
+
+Private mEnabled As Boolean
+Private Const mDefEnabled As Boolean = True
+
+Private mListView As Boolean
+Private Const mDefListView As Boolean = True
+
+Private mTrack As Boolean
+Private Const mDefTrack As Boolean = True
+
+Private mLimitCX As Boolean
+Private Const mDefLimitCX As Boolean = False
+
+Private mNoRf As Boolean
+Private Const mDefNoRf As Boolean = False
+
+
+Private mBk As OLE_COLOR
+Private Const mDefBk As Long = &HFFFFFF
+
+Private mBkLV As OLE_COLOR
+Private Const mDefBkLV As Long = &HFFFFFF
+
+#If TWINBASIC Then
+[EnumId("55209AC8-57EA-4644-AA85-4974AA31E101")]
+#End If
+Public Enum UCPCType
+    UCPC_DropdownList
+    UCPC_Combo
+End Enum
+Private mStyle As UCPCType
+Private Const mDefStyle As Long = 0
+
+'We don't need the .Flags argument so we can skip the whole
+'issue with packing alignment padding bytes, but we don't
+'want to read past the end of the struct in VB6
+#If Win64 Then
+Private Const cbnmlvkd = &H1E
+#Else
+Private Const cbnmlvkd = &H12
+#End If
+
+
+
+'Only a VB6 set of APIs is given here because they're covered by WinDevLib,
+'the dependency for the interfaces, in twinBASIC.
+'Also covered are SDK macros and helpers provided by WDL where the 64bit 
+'version is different.
+#If TWINBASIC = 0 Then
+    
+    
+    
+    
+    
+#End If
+
+
+
+Private Sub DebugAppend(ByVal sMsg As String, Optional ilvl As Long = 0)
+If ilvl > dbg_VerbosityLevel Then Exit Sub
+Dim sOut As String
+If dbg_IncludeDate Then sOut = "[" & Format$(Now, dbg_dtFormat) & "] "
+If dbg_IncludeName Then sOut = sOut & Ambient.DisplayName & ": "
+sOut = sOut & sMsg
+If dbg_PrintToImmediate Then Debug.Print sOut
+' If dbg_RaiseEvent = True Then RaiseEvent DebugMessage(sOut, CInt(ilvl))
+' If dbg_PrintToFile Then
+'     If log_hFile Then
+'         WriteLog sOut
+'     End If
+' End If
+End Sub
+
+Private Sub UserControl_Initialize() Handles UserControl.Initialize
+    hShell32 = LoadLibraryW(StrPtr("shell32.dll"))
+    Dim hDC As LongPtr
+    hDC = GetDC(0)
+    mDPI = GetDeviceCaps(hDC, LOGPIXELSX) / USER_DEFAULT_SCREEN_DPI
+    'Get the actual scale factor even if virtualized.
+    
+    Dim tDC As LongPtr, lRez As Long, lDPI As Long
+    tDC = GetDC(0)
+    lRez = GetDeviceCaps(tDC, DESKTOPHORZRES)
+    lDPI = 96! * lRez / (Screen.Width / Screen.TwipsPerPixelX) * 15 / (1440 / GetDeviceCaps(tDC, LOGPIXELSX))
+    ReleaseDC 0, tDC
+    mActualZoom = CSng(lDPI) / 96!
+    
+    
+    ' Dim hMonitor As LongPtr
+    ' hMonitor = MonitorFromWindow(UserControl.hWnd, MONITOR_DEFAULTTONEAREST)
+
+    ' ' Get the logical width And height of the monitor.
+    ' Dim miex As MONITORINFOEXW
+    ' miex.info.cbSize = LenB(miex)
+    ' GetMonitorInfoW hMonitor, miex
+    ' Dim cxLogical As Long
+    ' cxLogical = (miex.info.rcMonitor.Right - miex.info.rcMonitor.Left)
+    ' Dim cyLogical As Long
+    ' cyLogical = (miex.info.rcMonitor.Bottom - miex.info.rcMonitor.Top)
+
+    ' 'Get the physical width And height of the monitor.
+    ' Dim dm As DEVMODEW
+    ' dm.dmSize = LenB(dm)
+    ' dm.dmDriverExtra = 0
+    ' If EnumDisplaySettingsW(VarPtr(miex.szDevice(0)), ENUM_CURRENT_SETTINGS, dm) Then
+    '     Debug.Print "EnumDisplaySettingsW success"
+    ' Else
+    '     Debug.Print "EnumDisplaySettingsW error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+    '     Debug.Print GetLastError()
+    ' End If
+    ' Dim cxPhysical As Long
+    ' cxPhysical = dm.dmPelsWidth
+    ' Dim cyPhysical As Long
+    ' cyPhysical = dm.dmPelsHeight
+
+    ' ' Calculate the scaling factor.
+    ' mActualZoom = CSng(cxPhysical) / CSng(cxLogical)
+    DebugAppend "mActualZoom=" & mActualZoom & ", mDPI=" & mDPI
+    ReDim SysImgCache(0)
+    smCXEdge = GetSystemMetrics(SM_CXFIXEDFRAME)
+    smCYEdge = GetSystemMetrics(SM_CXFIXEDFRAME)
+    If smCXEdge = 0 Then smCXEdge = 1
+    If smCYEdge = 0 Then smCYEdge = 1
+    mIdxSel = -1
+    IsComCtl6 = (ComCtlVersion >= 6)
+    Call ucPrinterComboSetVTableHandling(Me, VTableInterfaceInPlaceActiveObject)
+End Sub
+Private Sub InitImageLists()
+    'himlTV = ImageList_Create(mIconSize, mIconSize, ILC_COLOR32 Or ILC_MASK Or ILC_HIGHQUALITYSCALE, 1, 1)
+    If IsComCtl6 = False Then
+        himlMain = ImageList_Create(cxyIcon * mDPI, cxyIcon * mDPI, ILC_COLOR32 Or ILC_MASK, 1, 1)
+        Dim clbk As Long
+        OleTranslateColor mBk, 0&, clbk
+        ImageList_SetBkColor himlMain, clbk
+    Else
+        himlMain = ImageList_Create(cxyIcon * mDPI, cxyIcon * mDPI, ILC_COLOR32 Or ILC_MASK Or ILC_HIGHQUALITYSCALE, 1, 1)
+    End If
+    DebugAppend "InitImageLists->IsComCtl=" & IsComCtl6 & ",himlMain=" & himlMain
+    Call SHGetImageList(SHIL_JUMBO, IID_IImageList, pImlLarge)
+    Call SHGetImageList(SHIL_SMALL, IID_IImageList, pImlSmall)
+    himlLarge = ObjPtr(pImlLarge)
+    himlSmall = ObjPtr(pImlSmall)
+End Sub
+Private Function TranslateIcon(nIcon As Long, si As IShellItem, dwAttr As Long, pidlFQCur As LongPtr, pidlFQ As LongPtr, cx As Long, cy As Long, Optional pidlRel As LongPtr = 0, Optional bFlag1 As Boolean = False) As Long
+    DebugAppend "TranslateIcon::Entry", 2
+'Takes a system image list index and returns the local TreeView index. 
+'If not added already, adds it.
+Dim lIdx As Long
+lIdx = SysImlCacheLookup(nIcon)
+DebugAppend "TranslateIcon::CacheLookup=" & lIdx
+
+If lIdx > -1 Then
+    DebugAppend "TranslateIcon " & nIcon & "|" & lIdx & " (Cached)", 2
+    TranslateIcon = lIdx
+    Exit Function
+End If
+DebugAppend "TranslateIcon::PreLoadUncached", 2
+lIdx = AddToHIMLNoDLL(himlMain, si, dwAttr, pidlFQCur, pidlFQ, cx, cy, pidlRel)
+DebugAppend "TranslateIcon::PostLoadUncache, lIdx=" & lIdx
+ReDim Preserve SysImgCache(nSysImgCache)
+SysImgCache(nSysImgCache).sysimlid = nIcon
+SysImgCache(nSysImgCache).limlidx = lIdx
+nSysImgCache = nSysImgCache + 1
+DebugAppend "TranslateIcon " & nIcon & "|" & lIdx & " (added)", 2
+TranslateIcon = lIdx
+End Function
+Private Function EnsureOverlay(nIdx As Long) As Long
+    If nIdx = -1 Then Exit Function
+    DebugAppend "added = " & bOvrAdded(nIdx)
+    
+    If bOvrAdded(nIdx) Then
+        EnsureOverlay = 1
+        Exit Function
+    End If
+    
+    Dim nOvr As Long
+    Dim hIcon As LongPtr
+    Dim nPos As Long
+    pImlLarge.GetOverlayImage nIdx, nOvr
+    If nOvr >= 0 Then
+        pImlLarge.GetIcon nOvr, ILD_TRANSPARENT, hIcon
+        nPos = ImageList_AddIcon(himlMain, hIcon)
+        Call DestroyIcon(hIcon)
+        ImageList_SetOverlayImage himlMain, nPos, nIdx
+        bOvrAdded(nIdx) = True
+    End If
+End Function
+Private Function SysImlCacheLookup(nFI As Long) As Long
+Dim i As Long
+For i = 0 To UBound(SysImgCache)
+    If SysImgCache(i).sysimlid = nFI Then
+        SysImlCacheLookup = SysImgCache(i).limlidx
+        Exit Function
+    End If
+Next i
+SysImlCacheLookup = -1
+End Function
+Private Function AddToHIMLNoDLL(himl As LongPtr, si As IShellItem, dwAttr As Long, pidlFQCur As LongPtr, pidlFQ As LongPtr, cx As Long, cy As Long, Optional pidlRel As LongPtr = 0) As Long
+Dim isiif As IShellItemImageFactory
+Dim hr As Long
+Dim pidlcr As LongPtr
+Dim hBmp As LongPtr
+If (si Is Nothing) Then
+    If (pidlFQ = 0&) And (pidlRel <> 0&) Then
+        'Virtual object; try to recreate pidl
+        pidlcr = ILCombine(pidlFQCur, pidlRel)
+    Else
+        pidlcr = pidlFQ
+    End If
+    hr = SHCreateItemFromIDList(pidlcr, IID_IShellItemImageFactory, isiif)
+Else
+    Set isiif = si
+End If
+If isiif Is Nothing Then
+    DebugAppend "AddToHIMLNoDLL->Couldn't get image factory."
+    AddToHIMLNoDLL = -1
+    Exit Function
+End If
+#If TWINBASIC Then
+Dim tsz As SIZE
+#Else
+Dim tsz As oleexp.SIZE
+#End If
+'BUGFIX: Some Windows versions, for entirely unknown reasons, for the standard
+'        printer icon, load the 32x32 version if you ask for 48x48; request
+'        49x49 to actually get 48x48.
+If cx = 48 Then
+    tsz.cx = cx + 1: tsz.cy = cy + 1
+Else
+    tsz.cx = cx: tsz.cy = cy
+End If
+Dim lFlags As SIIGBF
+lFlags = SIIGBF_BIGGERSIZEOK
+#If TWINBASIC Then
+Dim ull As LongLong
+CopyMemory ull, tsz, 8
+hr = isiif.GetImage(ull, lFlags, hBmp)
+#Else
+hr = isiif.GetImage(tsz.cx, tsz.cy, lFlags, hBmp)    
+#End If
+If hr = S_OK Then
+'    If ThumbShouldFrame(hBmp) Then
+'        hr = E_FAIL 'This manual checking should only be needed for IL_AddMasked
+                    'But it can't hurt to verify anyway; when a fail is returned
+                    'from this function it goes to the GDIP scaler/framer.
+'    End If
+Else
+    lFlags = SIIGBF_ICONONLY
+    #If TWINBASIC Then
+    hr = isiif.GetImage(ull, lFlags, hBmp)
+    #Else
+    hr = isiif.GetImage(tsz.cx, tsz.cy, lFlags, hBmp)    
+    #End If
+End If
+        
+If hr = S_OK Then
+    Dim clrMsk As Long
+    If IsComCtl6 = False Then
+        OleTranslateColor UserControl.ForeColor, 0&, clrMsk
+        AddToHIMLNoDLL = ImageList_AddMasked(himl, hBmp, clrMsk)
+    Else
+        AddToHIMLNoDLL = ImageList_Add(himl, hBmp, 0&)
+        ' If (AddToHIMLNoDLL = -1) And (hBmp <> 0) And (hBmp <> -1) Then
+        '     AddToHIMLNoDLL = AddToImageListEx(himl, hBmp, cx, cy)
+        ' End If
+                
+    End If
+    DeleteObject hBmp
+Else
+    AddToHIMLNoDLL = -1
+End If
+    
+Set isiif = Nothing
+DebugAppend "AddToHIMLNoDLL return=" & AddToHIMLNoDLL
+End Function
+Private Function ComCtlVersion() As Long
+Dim tVI As DLLVERSIONINFO
+On Error Resume Next
+tVI.cbSize = LenB(tVI)
+If DllGetVersion(tVI) = S_OK Then ComCtlVersion = tVI.dwMajorVersion
+End Function
+
+Private Sub UserControl_Resize() 'Handles UserControl.Resize
+    If hCombo Then
+        Dim rc As RECT
+        Dim rcWnd As RECT
+        GetClientRect UserControl.hWnd, rc
+        SetWindowPos hCombo, 0, 0, 0, rc.Right, cyList * mDPI, SWP_NOMOVE Or SWP_NOZORDER
+        With UserControl
+            If DPICorrectionFactor() <> 1 Then Call SyncObjectRectsToContainer(Me)
+            If hCombo = 0 Then Exit Sub
+            Dim WndRect As RECT
+            If .ScaleHeight > 0 Then MoveWindow hCombo, 0, 0, .ScaleWidth, .ScaleHeight, 1
+            GetWindowRect hCombo, WndRect
+            If (WndRect.Bottom - WndRect.Top) <> .ScaleHeight Or (WndRect.Right - WndRect.Left) <> .ScaleWidth Then
+                .Extender.Move .Extender.Left, .Extender.Top, .Extender.Width, .ScaleY((WndRect.Bottom - WndRect.Top), vbPixels, vbContainerSize)
+                If DPICorrectionFactor() <> 1 Then Call SyncObjectRectsToContainer(Me)
+            End If
+            MoveWindow hCombo, 0, 0, .ScaleWidth, .ScaleHeight, 1
+        End With
+    End If
+End Sub
+Private Function DPI_X() As Long
+Dim hDCScreen As LongPtr
+hDCScreen = GetDC(0)
+If hDCScreen <> 0 Then
+    DPI_X = GetDeviceCaps(hDCScreen, LOGPIXELSX)
+    ReleaseDC 0, hDCScreen
+End If
+End Function
+ 
+Private Function DPICorrectionFactor() As Single
+Static Done As Boolean, Value As Single
+If Done = False Then
+    Value = ((96 / DPI_X()) * 15) / Screen.TwipsPerPixelX
+    Done = True
+End If
+' Returns exactly 1 when no corrections are required.
+DPICorrectionFactor = Value
+End Function
+Private Sub SyncObjectRectsToContainer(ByVal This As Object)
+On Error GoTo CATCH_EXCEPTION
+Dim PropOleObject As IOleObject
+Dim PropOleInPlaceObject As IOleInPlaceObject
+Dim PropOleInPlaceSite As IOleInPlaceSite
+#If TWINBASIC Then
+Dim PosRect As RECT
+Dim ClipRect As RECT
+#Else
+Dim PosRect As oleexp.RECT
+Dim ClipRect As oleexp.RECT 
+#End If
+Dim FrameInfo As OLEINPLACEFRAMEINFO
+Set PropOleObject = This
+Set PropOleInPlaceObject = This
+Set PropOleInPlaceSite = PropOleObject.GetClientSite
+PropOleInPlaceSite.GetWindowContext Nothing, Nothing, VarPtr(PosRect), VarPtr(ClipRect), VarPtr(FrameInfo)
+PropOleInPlaceObject.SetObjectRects VarPtr(PosRect), VarPtr(ClipRect)
+CATCH_EXCEPTION:
+End Sub
+
+Private Sub UserControl_Show() Handles UserControl.Show
+    DebugAppend "UserControl_Show"
+    If mInit = False Then
+        mInit = True
+        InitControl
+    End If
+End Sub
+
+Private Sub UserControl_Terminate() Handles UserControl.Terminate
+    Call ucPrinterComboRemoveVTableHandling(Me, VTableInterfaceInPlaceActiveObject)
+    If hLVW Then
+        SendMessage hLVW, LVM_SETIMAGELIST, LVSIL_NORMAL, ByVal 0
+        SendMessage hLVW, LVM_SETIMAGELIST, LVSIL_SMALL, ByVal 0
+        DestroyWindow hLVW
+    End If
+    ImageList_Destroy himlMain
+    DestroyWindow hCombo
+    DeleteObject hFont
+    DeleteObject hFontBold
+    hFont = 0
+    hFontBold = 0
+    If hTheme Then CloseThemeData hTheme
+    FreeLibrary hShell32
+End Sub
+
+Private Sub UserControl_ReadProperties(PropBag As PropertyBag) Handles UserControl.ReadProperties
+    DebugAppend "UserControl_ReadProperties"
+    cxList = PropBag.ReadProperty("DropdownWidth", mDefCX)
+    cyList = PropBag.ReadProperty("DropdownHeight", mDefCY)
+    mNotify = PropBag.ReadProperty("MonitorChanges", mDefNotify)
+    mBk = PropBag.ReadProperty("BackColor", mDefBk)
+    mBkLV = PropBag.ReadProperty("BackColorListView", mDefBkLV)
+    mEnabled = PropBag.ReadProperty("Enabled", mDefEnabled)
+    mStyle = PropBag.ReadProperty("ComboStyle", mDefStyle)
+    DebugAppend "ReadStyle=" & mStyle & ", UCPC_DropdownList=" & UCPC_DropdownList & ", UCPC_Combo=" & UCPC_Combo
+    mListView = PropBag.ReadProperty("UseListView", mDefListView)
+    mTrack = PropBag.ReadProperty("ListViewHotTrack", mDefTrack)
+    mRaiseOnLoad = PropBag.ReadProperty("RaiseChangeOnLoad", mDefRaiseOnLoad)
+    mLimitCX = PropBag.ReadProperty("NoExtendWidth", mDefLimitCX)
+    cxyIcon = PropBag.ReadProperty("IconSize", mDefIcon)
+    mNoRf = PropBag.ReadProperty("NoRefreshTipOnDrop", mDefNoRf)
+    Set PropFont = PropBag.ReadProperty("Font", Nothing)
+    mInit = True
+    InitControl
+End Sub
+
+Private Sub UserControl_WriteProperties(PropBag As PropertyBag) Handles UserControl.WriteProperties
+    PropBag.WriteProperty "DropdownWidth", cxList, mDefCX
+    PropBag.WriteProperty "DropdownHeight", cyList, mDefCY
+    PropBag.WriteProperty "BackColor", mBk, mDefBk
+    PropBag.WriteProperty "BackColorListView", mBkLV, mDefBkLV
+    PropBag.WriteProperty "MonitorChanges", mNotify, mDefNotify
+    PropBag.WriteProperty "Enabled", mEnabled, mDefEnabled
+    PropBag.WriteProperty "ComboStyle", mStyle, mDefStyle
+    PropBag.WriteProperty "UseListView", mListView, mDefListView
+    PropBag.WriteProperty "ListViewHotTrack", mTrack, mDefTrack
+    PropBag.WriteProperty "RaiseChangeOnLoad", mRaiseOnLoad, mDefRaiseOnLoad
+    PropBag.WriteProperty "NoExtendWidth", mLimitCX, mDefLimitCX
+    PropBag.WriteProperty "IconSize", cxyIcon, mDefIcon
+    PropBag.WriteProperty "NoRefreshTipOnDrop", mNoRf, mDefNoRf
+    PropBag.WriteProperty "Font", IIf(OLEFontIsEqual(PropFont, Ambient.Font) = False, PropFont, Nothing), Nothing
+End Sub
+
+Private Sub UserControl_InitProperties() Handles UserControl.InitProperties
+    cxList = mDefCX
+    cyList = mDefCY
+    mBk = mDefBk
+    mNotify = mDefNotify
+    mEnabled = mDefEnabled
+    mStyle = mDefStyle
+    mTrack = mDefTrack
+    mRaiseOnLoad = mDefRaiseOnLoad
+    mLimitCX = mDefLimitCX
+    mListView = mDefListView
+    cxyIcon = mDefIcon
+    mNoRf = mDefNoRf
+    mBkLV = mDefBkLV
+    Set PropFont = Ambient.Font
+    DebugAppend "InitProps->Font=" & Ambient.Font.Name
+End Sub
+
+Public Property Get NoRefreshTipOnDrop() As Boolean: NoRefreshTipOnDrop = mNoRf: End Property
+Attribute NoRefreshTipOnDrop.VB_Description = "Don't reload the status information before showing the dropdown ListView."
+Public Property Let NoRefreshTipOnDrop(ByVal value As Boolean): mNoRf = value: End Property
+Public Property Get IconSize() As Long: IconSize = cxyIcon: End Property
+Attribute IconSize.VB_Description = "Size of the icons in ListView mode. Must be set at design time."
+Public Property Let IconSize(ByVal cxy As Long): cxyIcon = cxy: End Property
+Public Property Get NoExtendWidth() As Boolean: NoExtendWidth = mLimitCX: End Property
+Attribute NoExtendWidth.VB_Description = "Never extend the dropdown width beyond the width of the control."
+Public Property Let NoExtendWidth(ByVal bValue As Boolean): mLimitCX = bValue: End Property
+Public Property Get RaiseChangeOnLoad() As Boolean: RaiseChangeOnLoad = mRaiseOnLoad: End Property
+Attribute RaiseChangeOnLoad.VB_Description = "Raise a PrinterChange even when the default printer is automatically selected on load. It will also be raised if the printer list is refreshed."
+Public Property Let RaiseChangeOnLoad(ByVal bValue As Boolean): mRaiseOnLoad = bValue: End Property
+Public Property Get UseListView() As Boolean: UseListView = mListView: End Property
+Attribute UseListView.VB_Description = "Use a ListView with large icon and printer status instead of the normal dropdown listbox."
+Public Property Let UseListView(ByVal bValue As Boolean): mListView = bValue: End Property
+Public Property Get ListViewHotTrack() As Boolean: ListViewHotTrack = mTrack: End Property
+Attribute ListViewHotTrack.VB_Description = "Have the selection follow the cursor when using the ListView dropdown."
+Public Property Let ListViewHotTrack(ByVal bValue As Boolean): mTrack = bValue: End Property
+Public Property Get BackColor() As OLE_COLOR: BackColor = mBk: End Property
+Public Property Let BackColor(ByVal cr As OLE_COLOR)
+    mBk = cr
+    UserControl.BackColor = cr
+End Property
+Public Property Get BackColorListView() As OLE_COLOR: BackColorListView = mBkLV: End Property
+Public Property Let BackColorListView(ByVal cr As OLE_COLOR): mBkLV = cr: End Property
+Public Property Get ComboStyle() As UCPCType: ComboStyle = mStyle: End Property
+Attribute ComboStyle.VB_Description = "Sets the type of combobox used. Cannnot be changed during runtime."
+Public Property Let ComboStyle(ByVal Value As UCPCType): mStyle = Value: End Property
+Public Property Get Enabled() As Boolean: Enabled = mEnabled: End Property
+Attribute Enabled.VB_Description = "Sets whether the control is enabled."
+Public Property Let Enabled(ByVal fEnable As Boolean)
+    If fEnable <> mEnabled Then
+        mEnabled = fEnable
+        If hCombo Then
+            If mEnabled Then
+                EnableWindow hCombo, CTRUE
+            Else
+                EnableWindow hCombo, CFALSE
+            End If
+        End If
+    End If
+End Property
+Public Property Get DropdownWidth() As Long: DropdownWidth = cxList: End Property
+Attribute DropdownWidth.VB_Description = "The maximum width, when wider than the control but less than the untruncated item width."
+Public Property Let DropdownWidth(ByVal Value As Long)
+    If Value <> cxList Then
+        cxList = Value
+        If Ambient.UserMode Then
+            If Not mLimitCX Then
+                SendMessage hCombo, CB_SETDROPPEDWIDTH, cxList, ByVal 0
+            End If
+        End If
+    End If
+End Property
+
+Public Property Get DropdownHeight() As Long: DropdownHeight = cyList: End Property
+Attribute DropdownHeight.VB_Description = "Sets the maximum height of the dropdown, when not limited by total item height or available screen space."
+Public Property Let DropdownHeight(ByVal Value As Long)
+    If Value <> cyList Then
+        cyList = Value
+    End If
+End Property
+
+Public Property Get Font() As StdFont
+Attribute Font.VB_Description = "Sets the font for the text. "
+Set Font = PropFont
+End Property
+
+Public Property Let Font(ByVal NewFont As StdFont)
+Set Me.Font = NewFont
+End Property
+
+Public Property Set Font(ByVal NewFont As StdFont)
+'DebugAppend "FontSet"
+If NewFont Is Nothing Then Set NewFont = Ambient.Font
+Dim OldFontHandle As LongPtr
+Set PropFont = NewFont
+OldFontHandle = hFont
+Set mIFMain = PropFont
+Dim lftmp As LOGFONT
+GetObjectW mIFMain.hFont, LenB(lftmp), lftmp
+hFont = CreateFontIndirect(lftmp)
+If hFontBold Then
+    DeleteObject hFontBold
+End If
+lftmp.LFWeight = FW_BOLD
+hFontBold = CreateFontIndirect(lftmp)
+If hCombo <> 0 Then SendMessageW hCombo, WM_SETFONT, hFont, ByVal 1&
+If hLVW <> 0 Then SendMessageW hLVW, WM_SETFONT, hFont, ByVal 1&
+If OldFontHandle <> 0 Then DeleteObject OldFontHandle
+Call UserControl_Resize
+UserControl.PropertyChanged "Font"
+End Property
+Private Sub PropFont_FontChanged(ByVal PropertyName As String) Handles PropFont.FontChanged
+    DebugAppend "FontChanged"
+    Dim OldFontHandle As LongPtr
+    OldFontHandle = hFont
+    Set mIFMain = PropFont
+    Dim lftmp As LOGFONT
+    GetObjectW mIFMain.hFont, LenB(lftmp), lftmp
+    hFont = CreateFontIndirect(lftmp)
+    If hFontBold Then
+        DeleteObject hFontBold
+    End If
+    lftmp.LFWeight = FW_BOLD
+    hFontBold = CreateFontIndirect(lftmp)
+    If hCombo <> 0 Then SendMessageW hCombo, WM_SETFONT, hFont, ByVal 1&
+    If hLVW <> 0 Then SendMessageW hLVW, WM_SETFONT, hFont, ByVal 1&
+    If OldFontHandle <> 0 Then DeleteObject OldFontHandle
+    Call UserControl_Resize
+    UserControl.PropertyChanged "Font"
+End Sub
+
+Public Property Get SelectedPrinter() As String
+    If Ambient.UserMode Then
+        If mIdxSel >= 0 Then
+            SelectedPrinter = mPrinters(mIdxSel).sName
+            Exit Property
+        Else
+            If mIdxDef >= 0 Then
+                SelectedPrinter = mPrinters(mIdxDef).sName
+                Exit Property
+            End If
+        End If
+        Dim lRet As Long, cchDef As Long
+        Dim sDef As String
+        lRet = GetDefaultPrinterW(0, cchDef)
+        If Err.LastDllError = ERROR_INSUFFICIENT_BUFFER Then
+            sDef = String$(cchDef - 1, 0)
+            lRet = GetDefaultPrinterW(StrPtr(sDef), cchDef)
+        End If
+        SelectedPrinter = sDef
+    End If
+End Property
+Attribute SelectedPrinter.VB_Description = "The currently selected printer."
+Attribute SelectedPrinter.VB_MemberFlags = "400"
+Public Property Let SelectedPrinter(ByVal sName As String)
+    If Ambient.UserMode Then
+        If nPr Then
+            Dim i As Long
+            For i = 0 To UBound(mPrinters)
+                If LCase$(sName) = LCase$(mPrinters(i).sName) Then
+                    If i <> mIdxSel Then
+                        mIdxSelPrev = mIdxSel
+                        mIdxSel = i
+                        If mIdxSelPrev <> mIdxSel Then
+                            SendMessage hCombo, CB_SETCURSEL, mPrinters(i).cbi, ByVal 0
+                            RaiseEvent PrinterChanged(mPrinters(i).sName, mPrinters(i).sParsingPath, mPrinters(i).sModel, mPrinters(i).sLocation, mPrinters(i).sLastStatus, mPrinters(i).bDefault)
+                        End If
+                    End If
+                End If
+            Next
+        End If
+    End If
+End Property
+Attribute SelectedIndex.VB_Description = "The index of the selected printer, suitable for GetPrinterInfo()."
+Public Property Get SelectedIndex() As Long
+    SelectedIndex = mIdxSel
+End Property
+
+Attribute PrinterCount.VB_Description = "Returns a count of printers. Use index values up to this - 1 for Printers() and GetPrinterInfo()."
+Public Property Get PrinterCount() As Long: PrinterCount = nPr: End Property
+Public Function Printers(ByVal index As Long) As String
+Attribute Printers.VB_Description = "Retrieves the name of the specified printer in the list."
+    If index <= UBound(mPrinters) Then
+        Printers = mPrinters(index).sName
+    End If
+End Function
+Public Sub GetPrinterInfo(ByVal index As Long, lpShellParsingPath As String, lpName As String, lpModel As String, lpLocation As String, lpLastStatusMessage As String, pbIsDefault As Boolean)
+Attribute GetPrinterInfo.VB_Description = "Retrieves extended information about the specified printer."
+    If index <= UBound(mPrinters) Then
+        lpName = mPrinters(index).sName
+        lpShellParsingPath = mPrinters(index).sParsingPath
+        lpModel = mPrinters(index).sModel
+        lpLocation = mPrinters(index).sLocation
+        lpLastStatusMessage = mPrinters(index).sLastStatus
+        pbIsDefault = mPrinters(index).bDefault
+    End If
+End Sub
+
+Public Sub GetPrinterPicture(ByVal index As Long, ByVal cxy As Long, pPicture As IPicture)
+    Attribute GetPrinterPicture.VB_Description = "Retrieves an IPicture/StdPicture object of the specified printer's icon."
+    If index <= UBound(mPrinters) Then
+        Dim desc As PICTDESC
+        Dim hbm As LongPtr
+        
+        GetPrinterBitmap index, cxy, hbm
+        desc.cbSizeofstruct = LenB(desc)
+        desc.picType = PICTYPE_BITMAP
+        desc.hImage = hbm
+        
+        OleCreatePictureIndirect desc, IID_IUnknown, CTRUE, pPicture
+    
+        DeleteObject hbm
+    End If
+End Sub
+#If TWINBASIC Then
+Public Sub GetPrinterBitmap(ByVal index As Long, ByVal cxy As Long, pHBITMAP As LongPtr)
+Attribute GetPrinterBitmap.VB_Description = "Retrieves an HBITMAP of the specified printer's icon. Caller is responsible for freeing with DeleteObject."
+Dim tsz As SIZE
+#Else
+Public Function GetPrinterBitmap(ByVal index As Long, ByVal cxy As Long, pHBITMAP As Long) As Long
+Dim tsz As oleexp.SIZE
+#End If
+If index > UBound(mPrinters) Then Exit Sub
+Dim isiif As IShellItemImageFactory
+Dim hr As Long
+SHCreateItemFromParsingName StrPtr(mPrinters(index).sParsingPath), Nothing, IID_IShellItemImageFactory, isiif
+If (isiif Is Nothing) = False Then
+    'BUGFIX: Some Windows versions, for entirely unknown reasons, for the standard
+    '        printer icon, load the 32x32 version if you ask for 48x48; request
+    '        49x49 to actually get 48x48.
+    If cxy = 48 Then
+        tsz.cx = cxy + 1: tsz.cy = cxy + 1
+    Else
+        tsz.cx = cxy: tsz.cy = cxy
+    End If
+    Dim lFlags As SIIGBF
+    lFlags = SIIGBF_BIGGERSIZEOK
+    #If TWINBASIC Then
+    Dim ull As LongLong
+    CopyMemory ull, tsz, 8
+    hr = isiif.GetImage(ull, lFlags, pHBITMAP)
+    #Else
+    hr = isiif.GetImage(tsz.cx, tsz.cy, lFlags, pHBITMAP)    
+    #End If
+    If hr = S_OK Then
+    '    If ThumbShouldFrame(hBmp) Then
+    '        hr = E_FAIL 'This manual checking should only be needed for IL_AddMasked
+                        'But it can't hurt to verify anyway; when a fail is returned
+                        'from this function it goes to the GDIP scaler/framer.
+    '    End If
+    Else
+        lFlags = SIIGBF_ICONONLY
+        #If TWINBASIC Then
+        hr = isiif.GetImage(ull, lFlags, pHBITMAP)
+        #Else
+        hr = isiif.GetImage(tsz.cx, tsz.cy, lFlags, pHBITMAP)    
+        #End If
+    End If
+End If
+
+End Sub
+
+Private Sub IObjectSafety_GetInterfaceSafetyOptions(riid As UUID, pdwSupportedOptions As ObjectSafetyFlags, pdwEnabledOptions As ObjectSafetyFlags) Implements IObjectSafety.GetInterfaceSafetyOptions
+    Const INTERFACESAFE_FOR_UNTRUSTED_CALLER As Long = &H1, INTERFACESAFE_FOR_UNTRUSTED_DATA As Long = &H2
+    pdwSupportedOptions = INTERFACESAFE_FOR_UNTRUSTED_CALLER Or INTERFACESAFE_FOR_UNTRUSTED_DATA
+    pdwEnabledOptions = INTERFACESAFE_FOR_UNTRUSTED_CALLER Or INTERFACESAFE_FOR_UNTRUSTED_DATA
+End Sub
+
+Private Sub IObjectSafety_SetInterfaceSafetyOptions(riid As UUID, ByVal dwOptionSetMask As ObjectSafetyFlags, ByVal dwEnabledOptions As ObjectSafetyFlags) Implements IObjectSafety.SetInterfaceSafetyOptions
+    
+End Sub
+
+#If TWINBASIC Then
+Private Sub IOleInPlaceActiveObjectVB_TranslateAccelerator(Handled As Boolean, RetVal As Long, ByVal hWnd As LongPtr, ByVal wMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal Shift As Long) 'Implements IOleInPlaceActiveObjectVB.TranslateAccelerator
+#Else
+Private Sub IOleInPlaceActiveObjectVB_TranslateAccelerator(Handled As Boolean, RetVal As Long, ByVal hWnd As Long, ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal Shift As Long) 'Implements IOleInPlaceActiveObjectVB.TranslateAccelerator
+#End If
+    If wMsg = WM_KEYDOWN Or wMsg = WM_KEYUP Then
+        Dim KeyCode As Integer
+        KeyCode = CLng(wParam) And &HFF&
+        DebugAppend "TA Key " & KeyCode & "|" & Asc(vbTab)
+        Select Case KeyCode
+            Case vbKeyUp, vbKeyDown, vbKeyLeft, vbKeyRight, vbKeyPageDown, vbKeyPageUp, vbKeyHome, vbKeyEnd, vbKeyTab, vbKeyReturn, vbKeyEscape
+                If KeyCode = vbKeyReturn Or KeyCode = vbKeyEscape Then
+                    If mListView Then
+                        If bLVVis Then
+                            CloseDropdown
+                        End If
+                    Else
+                        If SendMessage(hCombo, CB_GETDROPPEDSTATE, 0, ByVal 0&) <> 0 Then
+                            SendMessage hCombo, CB_SHOWDROPDOWN, 0, ByVal 0&
+                        End If
+                    End If
+                ElseIf KeyCode = vbKeyTab Then
+                    If mListView Then
+                        If bLVVis Then
+                            CloseDropdown
+                        End If
+                    Else
+                        If SendMessage(hCombo, CB_GETDROPPEDSTATE, 0, ByVal 0&) = 1 Then SendMessage hCombo, CB_SHOWDROPDOWN, 0, ByVal 0&
+                    End If
+ 
+                End If
+                SendMessage hWnd, wMsg, wParam, ByVal lParam
+                Handled = True
+        End Select
+    End If
+End Sub
+
+Private Sub InitControl()
+    DebugAppend "InitControl " & Ambient.UserMode
+    Set Me.Font = PropFont
+    InitImageLists
+    Dim clr As Long
+    OleTranslateColor mBk, 0, clr
+    UserControl.BackColor = clr
+    pvCreateCombo
+    If Ambient.UserMode Then
+        SHLoadNonloadedIconOverlayIdentifiers
+        RefreshPrinters
+        pvCreateListView
+        Subclass2 UserControl.hWnd, AddressOf ucPrinterUserControlWndProc, UserControl.hWnd, ObjPtr(Me)
+    End If
+End Sub
+Private Sub pvCreateListView()
+    Dim dwStyle As Long
+    dwStyle = WS_CHILD Or WS_TABSTOP Or WS_BORDER Or LVS_SHAREIMAGELISTS Or LVS_SHOWSELALWAYS Or LVS_SINGLESEL
+    hLVW = CreateWindowExW(0, StrPtr(WC_LISTVIEW), 0, dwStyle, 0, 0, 110, 110, UserControl.hWnd, 0, App.hInstance, ByVal 0)
+    If hLVW Then
+        Dim tCol As LVCOLUMNW
+        tCol.Mask = LVCF_WIDTH Or LVCF_TEXT
+        tCol.cchTextMax = Len(sCol0)
+        tCol.pszText = StrPtr(sCol0)
+        tCol.CX = UserControl.ScaleWidth
+        SendMessage hLVW, LVM_INSERTCOLUMNW, 0, tCol
+        
+        tCol.Mask = LVCF_WIDTH Or LVCF_TEXT
+        tCol.cchTextMax = Len(sCol1)
+        tCol.pszText = StrPtr(sCol1)
+        tCol.CX = UserControl.ScaleWidth
+        SendMessage hLVW, LVM_INSERTCOLUMNW, 0, tCol
+        
+        SendMessage hLVW, LVM_SETIMAGELIST, LVSIL_NORMAL, ByVal himlMain
+        SendMessage hLVW, LVM_SETIMAGELIST, LVSIL_SMALL, ByVal himlSmall
+        
+        SetWindowTheme hLVW, StrPtr("Combobox"), 0
+        'The ListView would have inherited the desktop font rather then
+        'the one set by the user for this control: 
+        ' If hFont Then
+        '     DeleteObject hFont
+        ' End If
+        ' Dim lftmp As LOGFONT
+        ' GetObjectW mIFMain.hFont, LenB(lftmp), lftmp
+        ' hFont = CreateFontIndirect(lftmp)
+        ' If hFontBold Then
+        '     DeleteObject hFontBold
+        ' End If
+        ' lftmp.LFWeight = FW_BOLD
+        ' hFontBold = CreateFontIndirect(lftmp)
+ 
+        ' SendMessage hLVW, WM_SETFONT, hFont, ByVal 0
+        If Ambient.UserMode Then
+           Subclass2 hLVW, AddressOf ucPrinterLVWndProc, hLVW, ObjPtr(Me)
+ 
+           SetParent hLVW, 0
+ 
+        End If
+    End If
+End Sub
+
+
+
+Private Sub pvCreateCombo()
+    Dim dwStyle As ComboBox_Styles
+    dwStyle = WS_CHILD Or WS_VISIBLE Or CBS_AUTOHSCROLL Or WS_TABSTOP
+    DebugAppend "mStyle=" & mStyle
+    If mStyle = UCPC_DropdownList Then
+        DebugAppend "ComboStyle->DropdownList"
+        dwStyle = dwStyle Or CBS_DROPDOWNLIST
+    Else
+        DebugAppend "ComboStyle->Standard"
+        dwStyle = dwStyle Or CBS_DROPDOWN
+    End If
+    Dim rc As RECT
+    GetClientRect UserControl.hWnd, rc
+    hCombo = CreateWindowExW(0, StrPtr(WC_COMBOBOXEX), 0, dwStyle, _
+                            0, 0, rc.Right, cyList * mDPI, UserControl.hWnd, 0, App.hInstance, ByVal 0)
+
+    SendMessage hCombo, CBEM_SETUNICODEFORMAT, 1, ByVal 0&
+    hComboCB = SendMessage(hCombo, CBEM_GETCOMBOCONTROL, 0, ByVal 0&)
+    If hComboCB <> 0 Then
+        Dim CBI As COMBOBOXINFO
+        CBI.cbSize = LenB(CBI)
+        GetComboBoxInfo hComboCB, CBI
+    End If
+    hComboEd = SendMessage(hCombo, CBEM_GETEDITCONTROL, 0, ByVal 0&)
+    If hComboEd = 0 Then hComboEd = FindWindowExW(hComboCB, 0, StrPtr("Edit"), 0)
+
+    hComboLB = CBI.hwndList
+
+    If hComboEd Then SendMessage hComboEd, EM_SETREADONLY, 1&, ByVal 0&
+    
+    Call SendMessage(hCombo, CBEM_SETIMAGELIST, 0, ByVal himlSmall)
+    DebugAppend "ImageListValid? " & himlSmall
+    If Ambient.UserMode Then
+        hTheme = OpenThemeData(hCombo, StrPtr("Combobox"))
+        Subclass2 hCombo, AddressOf ucPrinterComboWndProc, hCombo, ObjPtr(Me)
+        Subclass2 hComboCB, AddressOf ucPrinterComboCWndProc, hComboCB, ObjPtr(Me)
+        If hComboEd Then Subclass2 hComboEd, AddressOf ucPrinterComboEditWndProc, hComboEd, ObjPtr(Me)
+        If mListView = False Then
+            Subclass2 hComboLB, AddressOf ucPrinterComboEditWndProc, hComboLB, ObjPtr(Me)
+        End If
+        hComboIMC = ImmCreateContext()
+        If hComboIMC <> 0 Then ImmAssociateContext hComboEd, hComboIMC
+        
+        DebugAppend "hCombo=" & hCombo & ",hComboCB=" & hComboCB
+        ' Dim tFilter As DEV_BROADCAST_DEVICEINTERFACE
+        ' tFilter.dbcc_size = 32 'We can't use LenB because it uses the size above 28 to calculate
+        '                         'the length of the string in the C-style variable array on the end.
+        '                         'It's declared with a buffer since VB/tB don't support those, but if
+        '                         'the buffer isn't in use, use what we'd get for sizeof() if it wasn't
+        '                         'used in C++. 
+        ' tFilter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE
+        ' tFilter.dbcc_classguid = GUID_DEVINTERFACE_ 
+        ' hNotify = RegisterDeviceNotification(hMain, tFilter, DEVICE_NOTIFY_WINDOW_HANDLE)
+    Else
+        Dim pidl As LongPtr
+        Dim nIcon As Long
+        SHGetFolderLocation 0, CSIDL_PRINTERS, 0, 0, pidl
+        nIcon = GetIconIndexPidl(pidl, SHGFI_SMALLICON)
+        CBX_InsertItem hCombo, Ambient.DisplayName, nIcon
+        DebugAppend "Insert design mode icon " & nIcon
+        SendMessage hCombo, CB_SETCURSEL, 0, ByVal 0
+        CoTaskMemFree pidl
+    End If
+
+    If mEnabled = False Then
+        EnableWindow hCombo, CFALSE
+    End If
+End Sub
+Private Function CBX_InsertItem(ByVal hCBoxEx As LongPtr, sText As String, Optional iImage As Long = -1, Optional iOverlay As Long = -1, Optional lParam As Long = 0, Optional iItem As Long = -1, Optional iIndent As Long = 0, Optional iImageSel As Long = -1) As Long
+
+    Dim cbxi As COMBOBOXEXITEMW
+
+    With cbxi
+    .Mask = CBEIF_TEXT
+    .cchTextMax = Len(sText)
+    .pszText = StrPtr(sText)
+    If iImage <> -1 Then
+        .Mask = .Mask Or CBEIF_IMAGE Or CBEIF_SELECTEDIMAGE
+        .iImage = iImage
+    End If
+    If iOverlay <> -1 Then
+        .iOverlay = iOverlay
+    End If
+    If lParam Then
+        .Mask = .Mask Or CBEIF_LPARAM
+        .lParam = lParam
+    End If
+    If iIndent Then
+        .Mask = .Mask Or CBEIF_INDENT
+        .iIndent = iIndent
+    End If
+    If iImageSel <> -1 Then
+        .Mask = .Mask
+        .iSelectedImage = iImageSel
+    Else
+        .iSelectedImage = iImage
+    End If
+
+    .iItem = iItem
+
+    End With
+
+    CBX_InsertItem = CLng(SendMessage(hCBoxEx, CBEM_INSERTITEMW, 0, cbxi))
+
+End Function
+Private Function GetCBXItemlParam(hWnd As LongPtr, i As Long) As LongPtr
+    Dim cbxi As COMBOBOXEXITEMW
+    With cbxi
+    .Mask = CBEIF_LPARAM
+    .iItem = i
+    End With
+    If SendMessage(hWnd, CBEM_GETITEMW, 0, cbxi) Then
+    GetCBXItemlParam = cbxi.lParam
+    Else
+    GetCBXItemlParam = -1
+    End If
+End Function
+
+ 
+Public Sub RefreshPrinters()
+    mIdxSelPrev = mIdxSel
+    If mIdxSelPrev >= 0 Then
+        mLabelSelPrev = mPrinters(mIdxSel).sName
+    End If
+ 
+    Dim bFlag As Boolean
+    If nPr Then
+        mPrintersOld = mPrinters
+        nPrOld = nPr
+        bFlag = True
+    End If
+    
+    DoPrinterEnum
+    
+    If mIdxSel = -1 Then mIdxSel = mIdxDef
+    If mIdxSelPrev = -1 Then
+        mIdxSelPrev = mIdxDef
+        mLabelSelPrev = mPrinters(mIdxSel).sName
+    End If
+    
+ 
+    RefreshPrintersCombo
+ 
+    
+
+End Sub
+
+Private Function PrinterColChanged() As Boolean
+    If nPr <> nPrOld Then
+        PrinterColChanged = True
+        Exit Function
+    End If
+    Dim i As Long
+    For i = 0 To UBound(mPrinters)
+        If mPrinters(i).sName <> mPrintersOld(i).sName Then
+            PrinterColChanged = True
+            Exit Function
+        End If
+    Next
+End Function
+
+
+Private Function GetPropertyKeyDisplayString(pps As IPropertyStore, pkProp As PROPERTYKEY, Optional bFixChars As Boolean = True) As String
+'Gets the string value of the given canonical property; e.g. System.Company, System.Rating, etc
+'This would be the value displayed in Explorer if you added the column in details view
+'<EhHeader>
+On Error GoTo e0
+'</EhHeader>
+Dim lpsz As LongPtr
+Dim ppd As IPropertyDescription
+If ((pps Is Nothing) = False) Then
+    PSGetPropertyDescription pkProp, IID_IPropertyDescription, ppd
+    If (ppd Is Nothing) Then
+'        DebugAppend "GetPropertyKeyDisplayString->Could not obtain IPropertyDescription, will attempt alternative."
+        Dim vrr As Variant, vbr As Variant
+        pps.GetValue pkProp, vrr
+        PropVariantToVariant vrr, vbr
+        If (VarType(vbr) And vbArray) = vbArray Then
+            Dim i As Long
+            For i = LBound(vbr) To UBound(vbr)
+                GetPropertyKeyDisplayString = GetPropertyKeyDisplayString & CStr(vbr(i)) & "; "
+            Next i
+            If Len(GetPropertyKeyDisplayString) > 2 Then
+                GetPropertyKeyDisplayString = Left$(GetPropertyKeyDisplayString, Len(GetPropertyKeyDisplayString) - 2)
+            End If
+        Else
+            GetPropertyKeyDisplayString = CStr(vbr)
+        End If
+    Else
+        Dim hr As Long
+        hr = PSFormatPropertyValue(ObjPtr(pps), ObjPtr(ppd), PDFF_DEFAULT, lpsz)
+'        DebugAppend "prophr=0x" & Hex$(hr)
+        SysReAllocStringW VarPtr(GetPropertyKeyDisplayString), lpsz
+        CoTaskMemFree lpsz
+    End If
+    If bFixChars Then
+        GetPropertyKeyDisplayString = Replace$(GetPropertyKeyDisplayString, ChrW$(&H200E), "")
+        GetPropertyKeyDisplayString = Replace$(GetPropertyKeyDisplayString, ChrW$(&H200F), "")
+        GetPropertyKeyDisplayString = Replace$(GetPropertyKeyDisplayString, ChrW$(&H202A), "")
+        GetPropertyKeyDisplayString = Replace$(GetPropertyKeyDisplayString, ChrW$(&H202C), "")
+    End If
+    Set ppd = Nothing
+Else
+    DebugAppend "GetPropertyKeyDisplayString.Error->PropertyStore is not set."
+        
+End If
+'<EhFooter>
+Exit Function
+    
+e0:
+    DebugAppend "ucShellBrowse.GetPropertyKeyDisplayString->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+'</EhFooter>
+End Function
+
+Private Function PKEY_Printer_IsDefault() As PROPERTYKEY
+    'System.Printer.Default
+    '{FE9E4C12-AACB-4AA3-966D-91A29E6128B5, 3}
+    Static pk As PROPERTYKEY
+    If pk.fmtid.Data1 = 0 Then
+        Call DEFINE_PROPERTYKEY(pk, &HFE9E4C12, &HAACB, &H4AA3, &H96, &H6D, &H91, &HA2, &H9E, &H61, &H28, &HB5, 3)
+    End If
+    PKEY_Printer_IsDefault = pk
+End Function
+Private Function PKEY_Printer_Location() As PROPERTYKEY
+    'System.Printer.Default
+    '{FE9E4C12-AACB-4AA3-966D-91A29E6128B5, 4}
+    Static pk As PROPERTYKEY
+    If pk.fmtid.Data1 = 0 Then
+        Call DEFINE_PROPERTYKEY(pk, &HFE9E4C12, &HAACB, &H4AA3, &H96, &H6D, &H91, &HA2, &H9E, &H61, &H28, &HB5, 4)
+    End If
+    PKEY_Printer_Location = pk
+End Function
+Private Function PKEY_Printer_Model() As PROPERTYKEY
+    'System.Printer.Default
+    '{FE9E4C12-AACB-4AA3-966D-91A29E6128B5, 5}
+    Static pk As PROPERTYKEY
+    If pk.fmtid.Data1 = 0 Then
+        Call DEFINE_PROPERTYKEY(pk, &HFE9E4C12, &HAACB, &H4AA3, &H96, &H6D, &H91, &HA2, &H9E, &H61, &H28, &HB5, 5)
+    End If
+    PKEY_Printer_Model = pk
+End Function
+Private Function PKEY_Printer_Status() As PROPERTYKEY
+    'System.Printer.Default
+    '{FE9E4C12-AACB-4AA3-966D-91A29E6128B5, 7}
+    Static pk As PROPERTYKEY
+    If pk.fmtid.Data1 = 0 Then
+        Call DEFINE_PROPERTYKEY(pk, &HFE9E4C12, &HAACB, &H4AA3, &H96, &H6D, &H91, &HA2, &H9E, &H61, &H28, &HB5, 7)
+    End If
+    PKEY_Printer_Status = pk
+End Function
+
+
+
+Private Sub DoPrinterEnum()
+    'On Error GoTo e0
+    DebugAppend "DoPrinterEnum::Entry"
+    ReDim mPrinters(0): nPr = 0
+    Dim i As Long
+    Dim pFolder As IShellItem
+    Dim pEnum As IEnumShellItems
+    Dim pPrinter As IShellItem, pPrinter2 As IShellItem2
+    Dim pps As IPropertyStore
+    Dim upi As IParentAndItem
+    Dim psf As IShellFolder
+    Dim pOverlay As IShellIconOverlay
+    Dim pidlRel As LongPtr, pidlPar As LongPtr, pidlFQ As LongPtr
+    Dim lpName As LongPtr, lpParse As LongPtr
+    Dim lpTip As LongPtr
+    Dim pkm As New KnownFolderManager
+    Dim pkf As IKnownFolder
+    Dim dwAtr As Long
+    Dim pcl As Long
+    Dim sDef As String
+    Dim cchDef As Long
+    Dim lRet As Long
+    Dim nDefFB As Long 'Fallback method
+    Dim nIcon As Long
+    nDefFB = -1
+    Dim bSetDef As Boolean
+    lRet = GetDefaultPrinterW(0, cchDef)
+    If Err.LastDllError = ERROR_INSUFFICIENT_BUFFER Then
+        sDef = String$(cchDef - 1, 0)
+        lRet = GetDefaultPrinterW(StrPtr(sDef), cchDef)
+    End If
+    DebugAppend "looking for default printer: " & sDef
+    
+    pkm.GetFolder FOLDERID_PrintersFolder, pkf
+    If (pkf Is Nothing) = False Then
+        pkf.GetShellItem KF_FLAG_DEFAULT, IID_IShellItem, pFolder
+        If (pFolder Is Nothing) = False Then
+            pFolder.BindToHandler 0, BHID_EnumItems, IID_IEnumShellItems, pEnum
+            Do While pEnum.Next(1, pPrinter, pcl) = S_OK
+                lpName = 0: lpParse = 0: pidlRel = 0: pidlPar = 0: pidlFQ = 0
+                Set psf = Nothing: Set pOverlay = Nothing
+                ReDim Preserve mPrinters(nPr)
+                pPrinter.GetDisplayName SIGDN_NORMALDISPLAY, lpName
+                mPrinters(nPr).sName = LPWSTRtoStr(lpName)
+                DebugAppend "AddPrinter " & mPrinters(nPr).sName
+                pPrinter.GetDisplayName SIGDN_DESKTOPABSOLUTEPARSING, lpParse
+                mPrinters(nPr).sParsingPath = LPWSTRtoStr(lpParse)
+                Set upi = pPrinter
+                upi.GetParentAndItem pidlPar, psf, pidlRel
+                mPrinters(nPr).sInfoTip = GenerateInfoTip(pPrinter, psf, pidlRel)
+                'DebugAppend "AddPrinterTip " & mPrinters(nPr).sInfoTip
+                On Error Resume Next
+                pPrinter.GetAttributes SFGAO_LINK Or SFGAO_SHARE, dwAtr
+                pidlFQ = ILCombine(pidlPar, pidlRel)
+                nIcon = GetIconIndexPidl(pidlFQ, SHGFI_LARGEICON)
+                mPrinters(nPr).nIcon = nIcon
+                mPrinters(nPr).nIconLV = TranslateIcon(nIcon, pPrinter, dwAtr, pidlPar, pidlFQ, cxyIcon * mDPI, cxyIcon * mDPI, pidlRel)
+                CoTaskMemFree pidlFQ
+                'DebugAppend "SetPrinterIcon " & mPrinters(nPr).nIcon
+                mPrinters(nPr).nOvr = -1
+                Set pOverlay = psf
+                If (pOverlay Is Nothing) = False Then
+                    pOverlay.GetOverlayIconIndex pidlRel, mPrinters(nPr).nOvr
+                End If
+                If (mPrinters(nPr).nOvr > 15) Or (mPrinters(nPr).nOvr < 0) Then
+                    'Overlay icons are a mess. On Win7 there's a bunch in root that return 16, which is invalid
+                    'and will cause a crash later one, and doesn't show anything. Shares never get shown so I'm
+                    'going to manually set those
+                    mPrinters(nPr).nOvr = -1
+                    If (dwAtr And SFGAO_SHARE) = SFGAO_SHARE Then
+                        mPrinters(nPr).nOvr = 1
+                    End If
+                    If (dwAtr And SFGAO_LINK) = SFGAO_LINK Then
+                        mPrinters(nPr).nOvr = 2
+                    End If
+                End If
+                EnsureOverlay mPrinters(nPr).nOvr
+                If Len(sDef) Then
+                    If mPrinters(nPr).sName = sDef Then
+                        mPrinters(nPr).bDefault = True
+                        mIdxDef = nPr
+                        bSetDef = True
+                    End If
+                End If
+                'Fallback method for determining default printer.
+                'Likely to be removed in future versions after confirming
+                'reliability of the primary method above.
+                Set pPrinter2 = pPrinter
+                Dim vrDef As Variant
+                lRet = pPrinter2.GetProperty(PKEY_Printer_IsDefault, vrDef)
+                If SUCCEEDED(lRet) Then
+                    'This property is an LPWSTR; only the default will have it
+                    'So no need to dereference-- it would be localized anyway.
+                    If IsEmpty(vrDef) = False Then
+                        nDefFB = nPr
+                    End If
+                End If
+                
+                pPrinter2.GetPropertyStore GPS_BESTEFFORT Or GPS_OPENSLOWITEM, IID_IPropertyStore, pps
+                mPrinters(nPr).sModel = GetPropertyKeyDisplayString(pps, PKEY_Printer_Model)
+                mPrinters(nPr).sLocation = GetPropertyKeyDisplayString(pps, PKEY_Printer_Location)
+                mPrinters(nPr).sLastStatus = GetPropertyKeyDisplayString(pps, PKEY_Printer_Status)
+                Set pps = Nothing
+                
+                On Error GoTo e0
+                nPr = nPr + 1
+            Loop
+        End If
+    End If
+    If bSetDef = False Then
+        If nDefFB >= 0 Then
+            mPrinters(nDefFB).bDefault = True
+            mIdxDef = nDefFB
+        End If
+    End If
+    If mRaiseOnLoad Then
+        RaiseEvent PrinterChanged(mPrinters(mIdxDef).sName, mPrinters(mIdxDef).sParsingPath, mPrinters(mIdxDef).sModel, mPrinters(mIdxDef).sLocation, mPrinters(mIdxDef).sLastStatus, mPrinters(mIdxDef).bDefault)
+    End If
+    DebugAppend "DoPrinterEnum::Done, count=" & nPr
+    Exit Sub
+e0:
+    DebugAppend "Unexpected error in DoPrinterEnum->" & Err.Number & ": " & Err.Description
+End Sub
+ 
+Private Function GetIconIndexPidl(ByVal pidl As LongPtr, uType As Long) As Long
+Dim sfi As SHFILEINFOW
+If SHGetFileInfoW(ByVal pidl, 0, sfi, LenB(sfi), SHGFI_SYSICONINDEX Or SHGFI_PIDL Or uType) Then
+    GetIconIndexPidl = sfi.iIcon
+End If
+End Function
+
+Private Function GenerateInfoTip(si As IShellItem, psfCur As IShellFolder, pidlRel As LongPtr) As String
+ 
+Dim sTip As String
+On Error GoTo e0
+ 
+If (si Is Nothing = False) Then
+        
+    Dim pqi As IQueryInfo
+    si.BindToHandler 0&, BHID_SFUIObject, IID_IQueryInfo, pqi
+    If (pqi Is Nothing) Then
+'        DebugAppend "GenerateInfoTip::Try alternate..."
+        If (psfCur Is Nothing) = False Then
+            psfCur.GetUIObjectOf hLVW, 1&, pidlRel, IID_IQueryInfo, 0&, pqi
+        End If
+    End If
+    If (pqi Is Nothing) = False Then
+        Dim lpTip As LongPtr, sQITip As String
+        Dim dwFlags As QITipFlags
+        dwFlags = QITIPF_LINKUSETARGET Or QITIPF_USESLOWTIP Or QITIPF_SINGLELINE
+        pqi.GetInfoTip dwFlags, lpTip
+        sQITip = LPWSTRtoStr(lpTip)
+'        DebugAppend "QITIPF_USESLOWTIPGenerateInfoTip::Exit->UseSlowTip=" & sQITip, 11
+        GenerateInfoTip = Replace(Replace(Replace(Replace(Replace(sQITip, vbCrLf, ", "), vbLf, ", "), vbTab, vbNullString), "  ", " "), "  ", " ")
+        Exit Function
+    Else
+        DebugAppend "Failed to get IQueryInfo"
+    End If
+        
+    Dim lpp As Long
+    Dim si2p As IShellItem2
+    Dim pl As IPropertyDescriptionList
+    Dim pd As IPropertyDescription
+    Dim lpn As LongPtr, sPN As String
+        
+    Set si2p = si
+    Dim pst As IPropertyStore
+    si2p.GetPropertyDescriptionList PKEY_PropList_InfoTip, IID_IPropertyDescriptionList, pl
+    If (pl Is Nothing) = False Then
+        pl.GetCount lpp
+'        DebugAppend "InfoTip Cnt=" & lpp
+        If lpp Then
+            Dim stt As String
+            si2p.GetPropertyStore GPS_BESTEFFORT Or GPS_OPENSLOWITEM, IID_IPropertyStore, pst
+            If (pst Is Nothing) = False Then
+'                DebugAppend "PropsList=" & GetPropertyKeyDisplayString(pst, PKEY_PropList_InfoTip)
+                'We could just parse that; but going through IPropertyDescriptionList automatically skips
+                'fields where there's no data (an error is raised, hence the e1/resume next)GPS_DEFAULT Or
+                On Error GoTo e1
+                Dim i As Long
+                For i = 0 To (lpp - 1)
+                    pl.GetAt i, IID_IPropertyDescription, pd
+                    If (pd Is Nothing) = False Then
+                        stt = GetPropertyDisplayString(pst, pd, PKEY_Null)
+                        If stt <> "" Then
+                            pd.GetDisplayName lpn
+                            sPN = LPWSTRtoStr(lpn)
+                            stt = sPN & ": " & stt
+                            If sTip = "" Then
+                                sTip = stt
+                            Else
+                                sTip = sTip & vbCrLf & stt
+                            End If
+'                            DebugAppend "Prop=" & stt
+                            stt = ""
+                        Else
+                            DebugAppend "Prop=(empty)"
+                        End If
+                        Set pd = Nothing
+                    Else
+                        DebugAppend "Prop=(missing)"
+                    End If
+                Next i
+                Set pst = Nothing
+            End If
+        Else
+            DebugAppend "lpp=" & lpp
+        End If
+    Else
+        DebugAppend "No proplist"
+    End If
+Else
+    DebugAppend "No IShellItem"
+End If
+'DebugAppend "GenerateInfoTip::Exit->Regular=" & sTip, 11
+GenerateInfoTip = Replace(Replace(Replace(Replace(Replace(sTip, vbCrLf, ", "), vbLf, ", "), vbTab, vbNullString), "  ", " "), "  ", " ")
+Exit Function
+e0:
+DebugAppend "GenerateInfoTip->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+Exit Function
+e1:
+DebugAppend "GenerateInfoTip->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+Resume Next
+End Function
+
+Private Function GetPropertyDisplayString(pps As IPropertyStore, ppd As IPropertyDescription, BackupKey As PROPERTYKEY, Optional bFixChars As Boolean = True) As String
+'Same as above if you already have the IPropertyDescription (caller is responsible for freeing it too)
+Dim lpsz As LongPtr
+On Error GoTo e0
+If (pps Is Nothing) = False Then
+    If (ppd Is Nothing) Then
+        DebugAppend "GetPropertyDisplayString->Could not obtain IPropertyDescription, will attempt alternative."
+        If IsEqualPKEY(BackupKey, PKEY_Null) = False Then
+            Dim vrr As Variant, vbr As Variant
+            pps.GetValue BackupKey, vrr
+            PropVariantToVariant vrr, vbr
+            If (VarType(vbr) And vbArray) = vbArray Then
+                Dim i As Long
+                For i = LBound(vbr) To UBound(vbr)
+                    GetPropertyDisplayString = GetPropertyDisplayString & CStr(vbr(i)) & "; "
+                Next i
+                GetPropertyDisplayString = Left$(GetPropertyDisplayString, Len(GetPropertyDisplayString) - 2)
+            Else
+                GetPropertyDisplayString = CStr(vbr)
+            End If
+        End If
+    Else
+        PSFormatPropertyValue ObjPtr(pps), ObjPtr(ppd), PDFF_DEFAULT, lpsz
+        SysReAllocStringW VarPtr(GetPropertyDisplayString), lpsz
+        CoTaskMemFree lpsz
+    End If
+    If bFixChars Then
+        GetPropertyDisplayString = Replace$(GetPropertyDisplayString, ChrW$(&H202A), "")
+        GetPropertyDisplayString = Replace$(GetPropertyDisplayString, ChrW$(&H202C), "")
+        GetPropertyDisplayString = Replace$(GetPropertyDisplayString, ChrW$(&H200E), "")
+        GetPropertyDisplayString = Replace$(GetPropertyDisplayString, ChrW$(&H200F), "")
+    End If
+Else
+    DebugAppend "GetPropertyDisplayString.Error->PropertyStore or PropertyDescription is not set."
+        
+End If
+Exit Function
+e0:
+DebugAppend "GetPropertyDisplayString.Error->" & Err.Description & ", 0x" & Hex$(Err.Number), 3
+End Function
+
+Public Sub RefreshInfoTips()
+    If nPr Then
+        Dim i As Long
+        Dim sTmp As String
+        Dim pPrinter As IShellItem
+        Dim upi As IParentAndItem
+        Dim pidlPar As LongPtr
+        Dim pidlRel As LongPtr
+        Dim psf As IShellFolder
+        For i = 0 To UBound(mPrinters)
+            SHCreateItemFromParsingName StrPtr(mPrinters(i).sParsingPath), Nothing, IID_IShellItem, pPrinter
+            If (pPrinter Is Nothing) = False Then
+            Set upi = pPrinter
+                upi.GetParentAndItem pidlPar, psf, pidlRel
+                mPrinters(i).sInfoTip = GenerateInfoTip(pPrinter, psf, pidlRel)
+            End If
+        Next
+    End If
+End Sub
+Private Sub ShowListView()
+    'This sub is in *desperate* need of cleanup
+    
+    If mNoRf = False Then RefreshInfoTips 'Info tips may change often
+'CTDBG
+    ' Dim nPrDbg As Long = nPr
+    '   nPr = 12
+    Dim rcCombo As RECT
+    Dim rcLVI As RECT
+    Dim cxCombo As Long
+    Dim cxSet As Long
+    Dim cxIdeal As Long
+    GetWindowRect hCombo, rcCombo
+
+    Dim mi As MONITORINFO
+    Dim hMonitor As LongPtr
+    hMonitor = MonitorFromWindow(hCombo, MONITOR_DEFAULTTOPRIMARY)
+    mi.cbSize = LenB(mi)
+    GetMonitorInfoW hMonitor, mi
+    
+    cxCombo = (rcCombo.Right - rcCombo.Left)
+    If mLimitCX Then
+        cxSet = cxCombo
+    Else
+        cxIdeal = FindMaxWidth()
+        If cxIdeal < cxCombo Then
+            cxSet = cxCombo
+        Else
+            cxSet = cxIdeal
+        End If
+        If (cxList < cxIdeal) And (cxList > cxCombo) Then cxSet = cxList
+    End If
+    DebugAppend "SizeLV::cxIdeal=" & cxIdeal & ",cxCombo=" & cxCombo & ",cxList=" & cxList
+    
+    Dim cyIdeal As Long
+    Dim cyTile As Long
+    Dim cyMaxAvail As Long
+    Dim cyaUp As Long, cyaDown As Long
+    cyaUp = rcCombo.Top
+    cyaDown = mi.rcMonitor.Bottom - (rcCombo.Bottom - rcCombo.Top)
+    cyMaxAvail = IIf(cyaDown > cyaUp, cyaDown, cyaUp)
+    
+    DebugAppend "SizeLv::cyMaxAvail=" & cyMaxAvail
+    
+    cyTile = (32 + 4) * mDPI
+    cyIdeal = cyTile * nPr
+    
+    Dim bSB As Boolean
+    If ((cyList > 0) And (cyIdeal > cyList)) Or (cyIdeal > cyMaxAvail) Then 'Scrollbar!!
+        DebugAppend "SizeLv::Adjust for scrollbar"
+         Dim cxsb As Long
+        cxsb = GetSystemMetrics(SM_CXVSCROLL) * mActualZoom
+        cxIdeal = cxIdeal + cxsb
+        If cxIdeal < cxCombo Then
+            cxSet = cxCombo
+        Else
+            cxSet = cxIdeal
+            bSB = True
+        End If
+        If (cxList < cxIdeal) And (cxList > cxCombo) Then
+            cxSet = cxList
+            bSB = False 'Not so fast
+        End If
+    End If
+     
+    Dim clrt As Long
+    OleTranslateColor mBkLV, 0&, clrt
+    SendMessageW hLVW, LVM_SETBKCOLOR, 0, ByVal clrt
+    SendMessageW hLVW, LVM_SETTEXTBKCOLOR, 0, ByVal CLR_NONE
+    
+    Dim tLVI As LVTILEVIEWINFO
+    Dim tsz As SIZE
+    Call SendMessage(hLVW, LVM_SETVIEW, LV_VIEW_TILE, ByVal 0&)
+    
+    tLVI.cbSize = LenB(tLVI)
+    tLVI.dwMask = LVTVIM_COLUMNS Or LVTVIM_TILESIZE '
+    tLVI.dwFlags = LVTVIF_FIXEDWIDTH Or LVTVIF_FIXEDHEIGHT
+    If bSB Then 'Exclude scrollbar adjustment from tile size *only if* using ideal width
+        tsz.cx = (cxSet - (2 * mDPI)) - cxsb
+    Else
+        tsz.cx = cxSet - (2 * mDPI)
+    End If
+    tsz.cy = cyTile
+    tLVI.SizeTile = tsz
+    DebugAppend "Set tile cx=" & tsz.cx
+    tLVI.cLines = 2
+    Call SendMessage(hLVW, LVM_SETTILEVIEWINFO, 0, tLVI)
+    
+    
+    
+    If nPr Then
+        Dim lvi As LVITEMW
+        Dim i As Long
+        Dim nSetSel As Long
+        
+        For i = 0 To UBound(mPrinters)
+            lvi.Mask = LVIF_TEXT Or LVIF_PARAM Or LVIF_IMAGE
+            lvi.cchTextMax = Len(mPrinters(i).sName)
+            lvi.pszText = StrPtr(mPrinters(i).sName)
+            lvi.iImage = mPrinters(i).nIconLV
+            lvi.lParam = i
+            lvi.iItem = i
+            lvi.iSubItem = 0
+            mPrinters(i).lvi = CLng(SendMessage(hLVW, LVM_INSERTITEMW, 0, lvi))
+            ' If i = mIdxSel Then
+            '     nSetSel = mPrinters(i).lvi
+            ' End If
+            
+            lvi.Mask = LVIF_TEXT
+            lvi.iItem = mPrinters(i).lvi
+            lvi.iSubItem = 1
+            lvi.cchTextMax = Len(mPrinters(i).sInfoTip)
+            lvi.pszText = StrPtr(mPrinters(i).sInfoTip)
+            SendMessage hLVW, LVM_SETITEMW, 0, lvi
+            'DebugAppend "LVAddPrinter@ " & mPrinters(i).lvi & "::" & mPrinters(i).sName & ": " & mPrinters(i).sInfoTip
+        Next i
+'CTDBG        
+        'SIZING TEST :: Test computer only has 4; test more
+        ' For i = 0 To UBound(mPrinters)
+        '     lvi.Mask = LVIF_TEXT Or LVIF_PARAM Or LVIF_IMAGE
+        '     lvi.cchTextMax = Len(mPrinters(i).sName)
+        '     lvi.pszText = StrPtr(mPrinters(i).sName)
+        '     lvi.iImage = mPrinters(i).nIconLV
+        '     lvi.lParam = i
+        '     lvi.iItem = i
+        '     lvi.iSubItem = 0
+        '     mPrinters(i).lvi = CLng(SendMessage(hLVW, LVM_INSERTITEMW, 0, lvi))
+        '     ' If i = mIdxSel Then
+        '     '     nSetSel = mPrinters(i).lvi
+        '     ' End If
+            
+        '     lvi.Mask = LVIF_TEXT
+        '     lvi.iItem = mPrinters(i).lvi
+        '     lvi.iSubItem = 1
+        '     lvi.cchTextMax = Len(mPrinters(i).sInfoTip)
+        '     lvi.pszText = StrPtr(mPrinters(i).sInfoTip)
+        '     SendMessage hLVW, LVM_SETITEMW, 0, lvi
+        '     DebugAppend "LVAddPrinter@ " & mPrinters(i).lvi & "::" & mPrinters(i).sName & ": " & mPrinters(i).sInfoTip
+        ' Next i
+        ' For i = 0 To UBound(mPrinters)
+        '     lvi.Mask = LVIF_TEXT Or LVIF_PARAM Or LVIF_IMAGE
+        '     lvi.cchTextMax = Len(mPrinters(i).sName)
+        '     lvi.pszText = StrPtr(mPrinters(i).sName)
+        '     lvi.iImage = mPrinters(i).nIconLV
+        '     lvi.lParam = i
+        '     lvi.iItem = i
+        '     lvi.iSubItem = 0
+        '     mPrinters(i).lvi = CLng(SendMessage(hLVW, LVM_INSERTITEMW, 0, lvi))
+        '     ' If i = mIdxSel Then
+        '     '     nSetSel = mPrinters(i).lvi
+        '     ' End If
+            
+        '     lvi.Mask = LVIF_TEXT
+        '     lvi.iItem = mPrinters(i).lvi
+        '     lvi.iSubItem = 1
+        '     lvi.cchTextMax = Len(mPrinters(i).sInfoTip)
+        '     lvi.pszText = StrPtr(mPrinters(i).sInfoTip)
+        '     SendMessage hLVW, LVM_SETITEMW, 0, lvi
+        '     DebugAppend "LVAddPrinter@ " & mPrinters(i).lvi & "::" & mPrinters(i).sName & ": " & mPrinters(i).sInfoTip
+        ' Next i
+        
+        
+        SetTileInfo hLVW
+        
+        'DebugAppend "SizeLV::cxSet=" & cxSet & ",cxCombo=" & cxCombo
+        ListView_GetItemRect hLVW, 0, rcLVI, LVIR_ICON
+       'DebugAppend "SizeLV::IconBounds.Left=" & rcLVI.Left & ",Top=" & rcLVI.Top & ",Right=" & rcLVI.Right & ",Bottom=" & rcLVI.Bottom
+        ListView_GetItemRect hLVW, 0, rcLVI, LVIR_LABEL
+       ' DebugAppend "SizeLV::LabelBounds.Left=" & rcLVI.Left & ",Top=" & rcLVI.Top & ",Right=" & rcLVI.Right & ",Bottom=" & rcLVI.Bottom
+        ListView_GetItemRect hLVW, 0, rcLVI, LVIR_BOUNDS
+       ' DebugAppend "SizeLV::Bounds.Left=" & rcLVI.Left & ",Top=" & rcLVI.Top & ",Right=" & rcLVI.Right & ",Bottom=" & rcLVI.Bottom
+        
+        
+        Dim cySet As Long
+        Dim cyMin As Long
+        cyMin = (rcLVI.Bottom - rcLVI.Top) + (2 * smCYEdge)
+
+        cySet = ((rcLVI.Bottom - rcLVI.Top) * nPr) + (3 * nPr)
+'CTDBG
+        'nPr = nPrDbg
+        If (cyList > 0) And (cyList < cySet) Then cySet = cyList
+        If cySet < cyMin Then cySet = cyMin
+        SetWindowPos hLVW, HWND_TOPMOST, rcCombo.Left, rcCombo.Top + (rcCombo.Bottom - rcCombo.Top), cxSet, cySet, SWP_NOZORDER
+        SetWindowPos hLVW, HWND_TOPMOST, rcCombo.Left, rcCombo.Top + (rcCombo.Bottom - rcCombo.Top), rcCombo.Left + cxSet, rcCombo.Top + (rcCombo.Bottom - rcCombo.Top) + cySet, SWP_NOSIZE Or SWP_NOMOVE Or SWP_NOREPOSITION
+
+        'Set WS_EX_TOOLWINDOW otherwise it will add an icon to the taskbar
+        Dim dwExStyle As WindowStylesEx
+        dwExStyle = CLng(GetWindowLong(hLVW, GWL_EXSTYLE))
+        dwExStyle = dwExStyle Or WS_EX_PALETTEWINDOW 'includes WS_EX_TOOLWINDOW
+        SetWindowLong hLVW, GWL_EXSTYLE, dwExStyle
+        
+        Dim dwLVExStyle As LVStylesEx
+        dwLVExStyle = CLng(SendMessage(hLVW, LVM_GETEXTENDEDLISTVIEWSTYLE, 0, 0))
+        If mTrack Then
+            dwLVExStyle = dwLVExStyle Or LVS_EX_TRACKSELECT Or LVS_EX_FULLROWSELECT
+            SendMessage hLVW, LVM_SETHOVERTIME, 0, ByVal 1
+        Else
+            dwLVExStyle = dwLVExStyle And Not LVS_EX_TRACKSELECT
+        End If
+        Call SendMessage(hLVW, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, ByVal dwLVExStyle)
+         
+        Dim fUp As Boolean
+
+        If (rcCombo.Bottom + cySet) > mi.rcMonitor.Bottom Then
+            fUp = True
+            SetWindowPos hLVW, HWND_TOPMOST, rcCombo.Left, rcCombo.Top - cySet, cxSet, cySet, SWP_NOZORDER Or SWP_NOSIZE
+        End If
+        'DebugAppend "SizeLV::fUp=" & fUp
+        Dim bCBAnim As BOOL
+        SystemParametersInfo SPI_GETCOMBOBOXANIMATION, 0, bCBAnim, 0
+        If bCBAnim Then
+            Const CMS_QANIMATION = 165
+            AnimateWindow hLVW, CMS_QANIMATION, IIf(fUp, AW_VER_NEGATIVE, AW_VER_POSITIVE) Or AW_SLIDE
+        Else
+            ShowWindow hLVW, SW_SHOWNA
+        End If
+
+        RedrawWindow hLVW, vbNullPtr, 0, RDW_UPDATENOW Or RDW_INVALIDATE Or RDW_ERASE Or RDW_ALLCHILDREN
+        UpdateWindow hLVW
+        
+        Dim rcActual As RECT
+        GetWindowRect hLVW, rcActual
+        ' DebugAppend "ListView final pos=" & rcActual.Left & ", " & rcActual.Top & ", " & rcActual.Right & ", " & rcActual.Bottom
+        ' DebugAppend "Width should be: " & rcCombo.Left + cxSet & " - " & rcCombo.Left
+        ' DebugAppend "Height is: " & (rcActual.Bottom - rcActual.Top) & ", should be: " & cySet
+        
+        ' DebugAppend "mIdxSel=" & mIdxSel & ", mIdxDef=" & mIdxDef & ", mPrinters@mIdxSel=" & mPrinters(mIdxSel).sName & ", mPrinters@mIdxDef=" & mPrinters(mIdxDef).sName
+        ListView_SetSelectedItem hLVW, mIdxSel
+        ListView_EnsureVisible hLVW, mIdxSel, 0
+        
+       ' UserControl.SetFocus
+       'TODO: Not working.
+    '    AttachThreadInput(GetWindowThreadProcessId(hLVW), GetCurrentThreadId(), CTRUE)
+    '    EnableWindow hLVW, 1
+    '     If SetActiveWindow(hLVW) = 0 Then
+    '         DebugAppend "SetActiveWindow Error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+    '     End If
+    '     If SetForegroundWindow(hLVW) = 0 Then
+    '         DebugAppend "SetForegroundWindow Error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+    '     End If
+    '     If SetFocusAPI(hLVW) = 0 Then
+    '         DebugAppend "SetFocusAPI Error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+    '     End If
+    '     SendMessage(hLVW, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), ByVal 0)
+        
+        'SetCapture hLVW
+        Set gUCPrinterHookInst = Me
+        gUCPrinterHookWindow = hLVW
+        gUCPrinterHookHandle = SetWindowsHookEx(WH_MOUSE, AddressOf ucPrinterMouseHookProc, 0, App.ThreadID)
+        If gUCPrinterHookHandle = 0 Then
+            DebugAppend "Hook error: " & Err.LastDllError
+        End If
+        
+        DebugAppend "ListView count=" & ListView_GetItemCount(hLVW), 2
+        
+
+    End If
+    
+End Sub
+
+Private Function FindMaxWidth() As Long
+    Dim i As Long
+    Dim cx1 As Long, cx2 As Long
+    If nPr = 0 Then
+        FindMaxWidth = UserControl.ScaleWidth
+    Else
+        'Temporarily set the font to bold to calculate width...
+        Dim hfOrig As LongPtr, hfBold As LongPtr
+        Dim lf As LOGFONT
+        hfOrig = SendMessage(hLVW, WM_GETFONT, 0, ByVal 0)
+        If hfOrig Then
+            GetObjectW hfOrig, LenB(lf), lf
+            lf.LFWeight = FW_BOLD
+            hfBold = CreateFontIndirect(lf)
+            SendMessage hLVW, WM_SETFONT, hfBold, ByVal 1
+        End If
+        For i = 0 To UBound(mPrinters)
+            cx2 = CLng(SendMessage(hLVW, LVM_GETSTRINGWIDTHW, 0, ByVal StrPtr(mPrinters(i).sInfoTip)))
+            'DebugAppend "CalcMaxWidth(mAZ=" & mActualZoom & "), cx(" & mPrinters(i).sInfoTip & ")=" & cx2 & ", from uc=" & UserControl.TextWidth(mPrinters(i).sInfoTip) & ", from API on UC=" & TextWidthW(UserControl.hDC, mPrinters(i).sInfoTip) & ", from API on LV=" & TextWidthW(GetDC(hLVW), mPrinters(i).sInfoTip)
+            If cx2 > cx1 Then cx1 = cx2
+            'cx2 = UserControl.TextWidth(mPrinters(i).sName) 'Probably never, but just in case
+            cx2 = CLng(SendMessage(hLVW, LVM_GETSTRINGWIDTHW, 0, ByVal StrPtr(mPrinters(i).sName)))
+            If cx2 > cx1 Then cx1 = cx2
+        Next
+        If hfOrig Then
+            SendMessage hLVW, WM_SETFONT, hfOrig, ByVal 1
+            DeleteObject hfBold
+        End If
+        FindMaxWidth = cx1 + ((smCXEdge * mActualZoom) * 2) + (32 * mDPI + 8) + (8 * mActualZoom) 'Add border + large icon + margin
+        'DebugAppend "CalcMaxWidth::Calc with mActualZoom"
+ 
+    End If
+End Function
+
+Private Function TextWidthW(ByVal hDC As LongPtr, ByVal sString As String) As Long
+  Dim lptr As LongPtr
+  Dim s As SIZE
+  If LenB(sString) Then
+    lptr = StrPtr(sString)
+    If Not (lptr = 0) Then
+      GetTextExtentPoint32W hDC, lptr, Len(sString), s
+      TextWidthW = s.cx
+    End If
+  End If
+End Function
+
+Private Sub RefreshPrintersCombo()
+    If nPr Then
+        SendMessage hCombo, CB_RESETCONTENT, 0, ByVal 0
+        Dim nIdx As Long
+        Dim i As Long
+        For i = 0 To UBound(mPrinters)
+            mPrinters(i).cbi = CBX_InsertItem(hCombo, mPrinters(i).sName, mPrinters(i).nIcon, mPrinters(i).nOvr, i)
+            DebugAppend "FillCombo mPrinters(" & i & ").cbi=" & mPrinters(i).cbi, 2
+            If mPrinters(i).sName = mLabelSelPrev Then
+                nIdx = i
+            End If
+        Next
+        SendMessage hCombo, CB_SETCURSEL, nIdx, ByVal 0
+    End If
+End Sub
+
+Private Sub SetTileInfo(ByVal hwnd As LongPtr)
+    Dim tLVT As LVTILEINFO
+    Dim lCol() As Long
+    ReDim lCol(0)
+    lCol(0) = 1
+    Dim ct As Long
+    Dim i As Long
+    ct = CLng(SendMessage(hwnd, LVM_GETITEMCOUNT, 0, ByVal 0&))
+    For i = 0 To ct - 1
+        tLVT.cbSize = LenB(tLVT)
+        tLVT.iItem = i
+        tLVT.cColumns = UBound(lCol) + 1
+        tLVT.puColumns = VarPtr(lCol(0))
+        Call SendMessage(hwnd, LVM_SETTILEINFO, 0, tLVT)
+    Next i
+End Sub
+
+Private Function GetSysImageList(uFlags As SHGFI_flags) As LongPtr
+    Dim sfi As SHFILEINFOW
+    Dim sSys As String
+    Dim l As Long
+    sSys = String$(MAX_PATH, 0)
+    l = GetWindowsDirectoryW(StrPtr(sSys), MAX_PATH)
+    If l Then
+        sSys = Left$(sSys, l)
+    Else
+        sSys = Left$(Environ("WINDIR"), 3)
+    End If
+    ' Any valid file system path can be used to retrieve system image list handles.
+    GetSysImageList = SHGetFileInfoW(ByVal StrPtr(sSys), 0, sfi, LenB(sfi), SHGFI_SYSICONINDEX Or uFlags)
+End Function
+
+Private Function PrinterIndexFromListIndex(ByVal lvi As Long) As Long
+    Dim i As Long
+    For i = 0 To UBound(mPrinters)
+        If mPrinters(i).lvi = lvi Then
+            PrinterIndexFromListIndex = i
+            Exit Function
+        End If
+    Next i
+    PrinterIndexFromListIndex = -1
+End Function
+
+Private Function IsEqualPKEY(pk1 As PROPERTYKEY, pk2 As PROPERTYKEY) As Boolean
+    IsEqualPKEY = (CompareMemory(pk1, pk2, LenB(pk1)) = LenB(pk1))
+End Function
+
+Private Function OLEFontIsEqual(ByVal Font As StdFont, ByVal FontOther As StdFont) As Boolean
+If Font Is Nothing Then
+    If FontOther Is Nothing Then OLEFontIsEqual = True
+ElseIf FontOther Is Nothing Then
+    If Font Is Nothing Then OLEFontIsEqual = True
+Else
+    If Font.Name = FontOther.Name And Font.Size = FontOther.Size And Font.Charset = FontOther.Charset And Font.Weight = FontOther.Weight And _
+    Font.Underline = FontOther.Underline And Font.Italic = FontOther.Italic And Font.Strikethrough = FontOther.Strikethrough Then
+        OLEFontIsEqual = True
+    End If
+End If
+End Function
+
+Private Function MakeTrue( _
+                ByRef bValue As Boolean) As Boolean
+    MakeTrue = True: bValue = True
+End Function
+
+Private Function FindTopLevelWindow() As LongPtr
+    Dim hWndCur As LongPtr
+    Dim hWndPar As LongPtr
+    Dim sClass As String
+    Dim nLen As Long
+    Const nMaxIter As Long = 99 'Overwhelming likelihood of infinte loop
+    Dim i As Long
+    Dim IsIDE As Boolean
+    Debug.Assert MakeTrue(IsIDE)
+    
+    hWndCur = UserControl.ContainerHwnd
+    Do
+        hWndPar = GetParent(hWndCur)
+        sClass = String$(255, 0)
+        nLen = GetClassNameW(hWndPar, StrPtr(sClass), 255)
+        If nLen Then
+            sClass = Left$(sClass, nLen)
+            If IsIDE Then
+                If sClass = "ThunderMain" Then
+                    FindTopLevelWindow = hWndPar
+                    Exit Function
+                End If
+            Else
+                If sClass = "ThunderRT6Main" Then
+                    FindTopLevelWindow = hWndPar
+                    Exit Function
+                End If
+            End If
+        End If
+        hWndCur = hWndPar
+        i = i + 1: If i > nMaxIter Then Exit Do
+    Loop
+End Function
+    
+#If TWINBASIC Then
+Public Sub CloseDropdown(Optional ByVal hwndFrom As LongPtr)
+#Else
+Public Sub CloseDropdown(Optional ByVal hwndFrom As Long)
+#End If
+    DebugAppend "CloseDropdown, bLVVis=" & bLVVis & ", hwndFrom=" & hwndFrom & "|" & hCombo & "|" & hComboCB & "|" & hComboEd
+    If bLVVis Then
+        ShowWindow hLVW, SW_HIDE
+        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+        bLVVis = False
+        UnhookMouse
+        If hwndFrom Then
+            If (hwndFrom = hCombo) Or (hwndFrom = hComboCB) Then bFlagSuppressReopen = True
+        End If
+    Else
+        SendMessage hCombo, CB_SHOWDROPDOWN, 0, ByVal 0
+    End If
+End Sub
+
+Private Sub UnhookMouse()
+    If gUCPrinterHookHandle Then
+        UnhookWindowsHookEx gUCPrinterHookHandle
+        gUCPrinterHookHandle = 0
+        Set gUCPrinterHookInst = Nothing
+        gUCPrinterHookWindow = 0
+    End If
+End Sub
+
+Private Function GetLVItemlParam(hwndLV As LongPtr, iItem As Long) As LongPtr
+  Dim lvi As LVITEM
+  
+  lvi.Mask = LVIF_PARAM
+  lvi.iItem = iItem
+  If SendMessage(hwndLV, LVM_GETITEM, 0, lvi) Then
+    GetLVItemlParam = lvi.lParam
+  End If
+
+End Function
+
+Private Function Subclass2(hWnd As LongPtr, lpFN As LongPtr, Optional uId As LongPtr = 0&, Optional dwRefData As LongPtr = 0&) As Boolean
+    If uId = 0 Then uId = hWnd
+    Subclass2 = SetWindowSubclass(hWnd, lpFN, uId, dwRefData):      Debug.Assert Subclass2
+End Function
+Private Function UnSubclass2(hWnd As LongPtr, ByVal lpFN As LongPtr, pid As LongPtr) As Boolean
+    UnSubclass2 = RemoveWindowSubclass(hWnd, lpFN, pid)
+End Function
+Private Function PtrCbWndProc() As LongPtr
+    PtrCbWndProc = FARPROC(AddressOf ucPrinterComboWndProc)
+End Function
+Private Function PtrCbCWndProc() As LongPtr
+    PtrCbCWndProc = FARPROC(AddressOf ucPrinterComboCWndProc)
+End Function
+Private Function PtrCbEditWndProc() As LongPtr
+    PtrCbEditWndProc = FARPROC(AddressOf ucPrinterComboEditWndProc)
+End Function
+Private Function PtrCbLBWndProc() As LongPtr
+    PtrCbLBWndProc = FARPROC(AddressOf ucPrinterComboLBWndProc)
+End Function
+Private Function PtrUCWndProc() As LongPtr
+    PtrUCWndProc = FARPROC(AddressOf ucPrinterUserControlWndProc)
+End Function
+Private Function PtrLVWndProc() As LongPtr
+    PtrLVWndProc = FARPROC(AddressOf ucPrinterLVWndProc)
+End Function
+Private Function FARPROC(ByVal pfn As LongPtr) As LongPtr
+    FARPROC = pfn
+End Function
+
+
+
+#If TWINBASIC Then
+Public Function zzCBCWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr) As LongPtr
+#Else
+Public Function zzCBCWndProc(ByVal hWnd As Long, ByVal uMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal uIdSubclass As Long) As Long
+#End If
+Select Case uMsg
+
+    Case WM_NOTIFYFORMAT
+        zzCBCWndProc = NFR_UNICODE
+        Exit Function
+
+    Case WM_SETFOCUS
+        If wParam <> UserControl.hWnd And wParam <> hCombo And (wParam <> hComboEd Or hComboEd = 0) Then SetFocusAPI UserControl.hWnd: Exit Function
+        Call ucPrinterComboActivateIPAO(Me)
+    Case WM_KILLFOCUS
+        Call ucPrinterComboDeActivateIPAO
+    
+    Case WM_KEYDOWN
+        DebugAppend "WM_KEYDOWN CB Combo " & wParam & "|F4=" & VK_F4 & ",TAB=" & VK_TAB
+        If wParam = VK_F4 Then
+            If mListView Then
+                If bFlagSuppressReopen Then
+                    bFlagSuppressReopen = False
+                Else
+                    If bLVVis Then
+                        ShowWindow hLVW, 0
+                        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                        bLVVis = False
+                        UnhookMouse
+                    Else
+                        ShowListView
+                        bLVVis = True
+                    End If
+                End If
+                zzCBCWndProc = 1 'Cancel the actual dropdown.
+                Exit Function
+            End If
+        End If
+        'TODO: Not working:
+        ' If wParam = VK_TAB Then
+        ' DebugAppend "WM_KEYDOWN VK_TAB CB Combo " & wParam
+        '     If bLVVis Then
+        '     AttachThreadInput(GetWindowThreadProcessId(hLVW), GetCurrentThreadId(), CTRUE)
+        '     EnableWindow hLVW, 1
+        '      If SetActiveWindow(hLVW) = 0 Then
+        '          DebugAppend "SetActiveWindow Error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+        '      End If
+        '      If SetForegroundWindow(hLVW) = 0 Then
+        '          DebugAppend "SetForegroundWindow Error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+        '      End If
+        '      If SetFocusAPI(hLVW) = 0 Then
+        '          DebugAppend "SetFocusAPI Error: " & Err.LastDllError & " " & GetSystemErrorString(Err.LastDllError)
+        '      End If
+        '      SendMessage(hLVW, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), ByVal 0)
+        '     End If
+        ' End If
+        
+    Case WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
+                   DebugAppend "WM_LBUTTONDOWN CB Combo, bLVVis=" & bLVVis
+         If hComboEd = 0 Then
+            Select Case GetFocus()
+                Case hWnd, hCombo
+                    DebugAppend "WM_LBUTTONDOWN hwnd, hcombo, bLVVis=" & bLVVis
+                    mMouseDown = True
+                ' SendMessage hComboCB, CB_SHOWDROPDOWN, 0, ByVal 0
+                    If mListView Then
+                        If bFlagSuppressReopen Then
+                            bFlagSuppressReopen = False
+                        Else
+                            If bLVVis Then
+                                ShowWindow hLVW, 0
+                                SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                                bLVVis = False
+                                UnhookMouse
+                            Else
+                                ShowListView
+                                bLVVis = True
+                            End If
+                        End If
+                        zzCBCWndProc = 1 'Cancel the actual dropdown.
+                        Exit Function
+                    End If
+                Case Else
+                    UCNoSetFocusFwd = True: SetFocusAPI UserControl.hWnd: UCNoSetFocusFwd = False
+            End Select
+        Else
+            Select Case GetFocus()
+                Case hWnd, hCombo, hComboEd
+
+                Case Else
+                    UCNoSetFocusFwd = True: SetFocusAPI UserControl.hWnd: UCNoSetFocusFwd = False
+            End Select
+        End If
+        mMouseDown = True
+    ' SendMessage hComboCB, CB_SHOWDROPDOWN, 0, ByVal 0
+        If mListView Then
+            If bFlagSuppressReopen Then
+                bFlagSuppressReopen = False
+            Else
+                If bLVVis Then
+                    ShowWindow hLVW, 0
+                    SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                    bLVVis = False
+                    UnhookMouse
+                Else
+                    ShowListView
+                    bLVVis = True
+                End If
+            End If
+            zzCBCWndProc = 1 'Cancel the actual dropdown.
+            Exit Function
+        End If
+        
+    Case WM_DESTROY
+        Call UnSubclass2(hWnd, PtrCbCWndProc, uIdSubclass)
+End Select
+
+zzCBCWndProc = DefSubclassProc(hWnd, uMsg, wParam, lParam)
+Exit Function
+e0:
+DebugAppend "CBWndProc->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+    
+End Function
+#If TWINBASIC Then
+Public Function zzCBLBWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr) As LongPtr
+#Else
+Public Function zzCBLBWndProc(ByVal hWnd As Long, ByVal uMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal uIdSubclass As Long) As Long
+#End If
+Select Case uMsg
+
+    Case WM_NOTIFYFORMAT
+        zzCBLBWndProc = NFR_UNICODE
+        Exit Function
+
+        
+        
+    Case WM_DESTROY
+        Call UnSubclass2(hWnd, PtrCbLBWndProc, uIdSubclass)
+End Select
+
+zzCBLBWndProc = DefSubclassProc(hWnd, uMsg, wParam, lParam)
+Exit Function
+e0:
+DebugAppend "CBWndProc->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+    
+End Function
+#If TWINBASIC Then
+Public Function zzCBEditWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr) As LongPtr
+#Else
+Public Function zzCBEditWndProc(ByVal hWnd As Long, ByVal uMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal uIdSubclass As Long) As Long
+#End If
+Select Case uMsg
+
+    Case WM_NOTIFYFORMAT
+        zzCBEditWndProc = NFR_UNICODE
+        Exit Function
+
+    Case WM_SETFOCUS
+        If wParam <> UserControl.hWnd And wParam <> hCombo And wParam <> hComboCB Then SetFocusAPI UserControl.hWnd: Exit Function
+        Call ucPrinterComboActivateIPAO(Me)
+    Case WM_KILLFOCUS
+        Call ucPrinterComboDeActivateIPAO
+    Case WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
+        Select Case GetFocus()
+            Case hWnd, hCombo, hComboCB
+ 
+
+            Case Else
+                UCNoSetFocusFwd = True: SetFocusAPI UserControl.hWnd: UCNoSetFocusFwd = False
+        End Select
+    Case WM_KEYDOWN
+        DebugAppend "WM_KEYDOWN CBEdit"
+        If mListView Then
+            If wParam = VK_F4 Then
+                If bFlagSuppressReopen Then
+                    bFlagSuppressReopen = False
+                Else
+                    If bLVVis Then
+                        ShowWindow hLVW, 0
+                        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                        bLVVis = False
+                        UnhookMouse
+                    Else
+                        ShowListView
+                        bLVVis = True
+                    End If
+                End If
+                zzCBEditWndProc = 1 'Cancel the actual dropdown.
+                Exit Function
+            ElseIf wParam = VK_ESCAPE Then
+                If bLVVis Then
+                    Call CloseDropdown()
+                End If
+            ElseIf wParam = VK_TAB Then
+                If (mListView = True) And (bLVVis = True) Then
+                    DebugAppend "WM_KEYDOWN VK_TAB CBEdit"
+                    SetFocusAPI hLVW
+                End If
+            End If
+        End If
+        
+        
+    Case WM_DESTROY
+        Call UnSubclass2(hWnd, PtrCbEditWndProc, uIdSubclass)
+End Select
+
+zzCBEditWndProc = DefSubclassProc(hWnd, uMsg, wParam, lParam)
+Exit Function
+e0:
+DebugAppend "CBEditWndProc->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+    
+End Function
+
+#If TWINBASIC Then
+Public Function zzCBWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr) As LongPtr
+#Else
+Public Function zzCBWndProc(ByVal hWnd As Long, ByVal uMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal uIdSubclass As Long) As Long
+#End If
+
+Select Case uMsg
+
+    Case WM_NOTIFYFORMAT
+        zzCBWndProc = NFR_UNICODE
+        Exit Function
+    
+    Case WM_SETFOCUS
+        If wParam <> UserControl.hWnd Then SetFocusAPI UserControl.hWnd: Exit Function
+        Call ucPrinterComboActivateIPAO(Me)
+    Case WM_KILLFOCUS
+        Call ucPrinterComboDeActivateIPAO
+        
+        
+    Case WM_NCLBUTTONUP
+        DebugAppend "CB NCLBU"
+        
+    Case CB_SHOWDROPDOWN
+        'If hWnd = hComboCB Then
+        ' DebugAppend "CB_SHOWDROPDOWN"
+        ' zzCBWndProc = 1 'Cancel the actual dropdown.
+        ' Exit Function
+        'End If
+        
+    Case WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
+        DebugAppend "WM_LBUTTONDOWN CB, bLVVis=" & bLVVis
+        mMouseDown = True
+    ' SendMessage hComboCB, CB_SHOWDROPDOWN, 0, ByVal 0
+        If mListView Then
+            If bFlagSuppressReopen Then
+                bFlagSuppressReopen = False
+            Else
+                If bLVVis Then
+                    ShowWindow hLVW, 0
+                    SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                    bLVVis = False
+                    UnhookMouse
+                Else
+                    ShowListView
+                    bLVVis = True
+                End If
+            End If
+            zzCBWndProc = 1 'Cancel the actual dropdown.
+            Exit Function
+        End If
+
+    Case WM_LBUTTONUP
+        mMouseDown = False
+    
+    Case WM_KEYDOWN
+        DebugAppend "WM_KEYDOWN CB"
+        If wParam = VK_F4 Then
+            If mListView Then
+                zzCBWndProc = DefSubclassProc(hWnd, WM_LBUTTONDOWN, 1, 1000)
+                Exit Function
+            End If
+        End If
+        
+    Case WM_COMMAND
+        Dim lCode As Long
+        lCode = HIWORD(CLng(wParam))
+        Select Case lCode
+            Case CBN_DROPDOWN
+                ' DebugAppend "CBN_DROPDOWN"
+                ' SendMessage hComboCB, CB_SHOWDROPDOWN, 0, ByVal 0
+                ' ListView1.Visible = True
+                ' SetWindowPos ListView1.hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE Or SWP_NOMOVE Or SWP_NOREPOSITION
+                ' SetFocusAPI ListView1.hWnd
+                ' zzCBWndProc = 1 'Cancel the actual dropdown.
+                ' Exit Function
+        End Select
+        
+    Case WM_DESTROY
+        Call UnSubclass2(hWnd, PtrCbWndProc, uIdSubclass)
+End Select
+
+zzCBWndProc = DefSubclassProc(hWnd, uMsg, wParam, lParam)
+Exit Function
+e0:
+DebugAppend "CBWndProc->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+
+End Function
+#If TWINBASIC Then
+Public Function zzUCWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr) As LongPtr
+#Else
+Public Function zzUCWndProc(ByVal hWnd As Long, ByVal uMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal uIdSubclass As Long) As Long
+#End If
+
+Select Case uMsg
+' Case CB_SHOWDROPDOWN
+    
+'     DebugAppend "CB_SHOWDROPDOWN on Parent"
+'     zzUCWndProc = 1 'Cancel the actual dropdown.
+'     Exit Function
+
+    Case WM_NOTIFYFORMAT
+        zzUCWndProc = NFR_UNICODE
+        Exit Function
+        
+    Case WM_KEYDOWN
+        DebugAppend "WM_KEYDOWN UC"
+        If (wParam = VK_ESCAPE) Then
+            If bLVVis Then
+                CloseDropdown
+            End If
+        ElseIf (wParam = VK_F4) Then
+            If mListView Then
+                If bLVVis Then
+                    CloseDropdown
+                Else
+                    zzUCWndProc = DefSubclassProc(hWnd, WM_LBUTTONDOWN, 1, 1000)
+                    Exit Function
+                End If
+            Else
+                Dim bDrop As Long
+                bDrop = CLng(SendMessage(hCombo, CB_GETDROPPEDSTATE, 0, ByVal 0))
+                SendMessage hCombo, CB_SHOWDROPDOWN, IIf(bDrop, 0, 1), ByVal 0
+            End If
+        End If
+        
+    Case WM_SETFOCUS
+        DebugAppend "WM_SETFOCUS on UCWndProc, hwnd " & hWnd & "|" & hLVW
+
+    Case WM_KILLFOCUS
+        DebugAppend "WM_KILLFOCUS on UCWndProc, hwnd " & hWnd & "|" & hLVW
+        If bLVVis = True Then
+            If (wParam <> hWnd) And (wParam <> hCombo) And (wParam <> hComboCB) And (wParam <> hLVW) Then
+                CloseDropdown hWnd
+            End If
+        End If
+    Case WM_NCLBUTTONUP
+        DebugAppend "UC NCLBU"
+    
+    Case WM_NOTIFY
+        Dim tNMH As NMHDR
+        CopyMemory tNMH, ByVal lParam, LenB(tNMH)
+        If tNMH.hWndFrom = hLVW Then
+            Select Case tNMH.Code
+                Case LVN_HOTTRACK
+                    If mTrack Then
+                        Dim nmlv As NMLISTVIEW
+                        CopyMemory nmlv, ByVal lParam, LenB(nmlv)
+                        If (nmlv.iItem <> -1) And (nmlv.iItem <> mLastHT) Then
+                            mLastHT = nmlv.iItem
+                        End If
+                        ListView_SetSelectedItem hLVW, mLastHT
+                    End If
+                
+                Case LVN_KEYDOWN
+                    DebugAppend "LVN_KEYDOWN UC"
+                    If bLVVis Then
+                        Dim nmkd As NMLVKEYDOWN
+                        CopyMemory nmkd, ByVal lParam, cbnmlvkd
+                        Select Case nmkd.wVKey
+                            Case VK_ESCAPE, VK_F4
+                                DebugAppend "VK_ESCAPE, VK_F4 from LV on UCWndProc"
+                                ShowWindow hLVW, SW_HIDE
+                                SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                                bLVVis = False
+                                UnhookMouse
+                        End Select
+                    End If
+                    
+                Case NM_KILLFOCUS
+                    If tNMH.hWndFrom = hLVW Then
+                        DebugAppend "NM_KILLFOCUS from LV on UCWndProc"
+                        ShowWindow hLVW, SW_HIDE
+                        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                        bLVVis = False
+                        UnhookMouse
+                    End If
+                
+                Case NM_SETFOCUS
+                    If tNMH.hWndFrom = hLVW Then DebugAppend "NM_SETFOCUS from LV on UCWndProc"
+                    
+                Case NM_CLICK, NM_DBLCLK, NM_RETURN
+                    DebugAppend "NM_CLICK from LV on UCWndProc"
+                    Dim nLVSel As Long, lp As Long
+                    nLVSel = CLng(ListView_GetSelectedItem(hLVW))
+                    If nLVSel >= 0 Then
+                        mIdxSelPrev = mIdxSel
+                        mIdxSel = nLVSel
+                        lp = CLng(GetLVItemlParam(hLVW, mIdxSel))
+                        DebugAppend "NM_CLICK from hLVW on " & mIdxSel
+                        ShowWindow hLVW, SW_HIDE
+                        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                        bLVVis = False
+                        UnhookMouse
+                        DebugAppend "NM_CLICK lp=" & lp & ", (lp).sName+" & mPrinters(lp).sName & ",mPrinters(lp).cbi=" & mPrinters(lp).cbi
+                        SendMessage hCombo, CB_SETCURSEL, mPrinters(lp).cbi, ByVal 0
+                        If mIdxSelPrev <> mIdxSel Then
+                            RaiseEvent PrinterChanged(mPrinters(lp).sName, mPrinters(lp).sParsingPath, mPrinters(lp).sModel, mPrinters(lp).sLocation, mPrinters(lp).sLastStatus, mPrinters(lp).bDefault)
+                        End If
+                    Else
+                        'Canceled; don't update or raise changed
+                        ShowWindow hLVW, SW_HIDE
+                        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                        bLVVis = False
+                        UnhookMouse
+                    End If
+                    SetFocusAPI hCombo
+                    
+                Case NM_CUSTOMDRAW
+                    Dim NMLVCD As NMLVCUSTOMDRAW
+                    CopyMemory NMLVCD, ByVal lParam, LenB(NMLVCD)
+                    With NMLVCD.NMCD
+                        Select Case .dwDrawStage
+                            Case CDDS_PREPAINT
+                                ' lReturn = CDRF_NOTIFYITEMDRAW
+                                ' bHandled = True
+                                zzUCWndProc = CDRF_NOTIFYITEMDRAW
+                                Exit Function
+                                
+                            Case CDDS_ITEMPREPAINT
+                                Dim nItem As Long
+                                nItem = CLng(GetLVItemlParam(hLVW, CLng(.dwItemSpec))) 'PrinterIndexFromListIndex(.dwItemSpec)
+                                If nItem >= 0 Then
+                                    If mPrinters(nItem).bDefault Then
+                                        SelectObject .hDC, hFontBold
+                                        'DebugAppend "DrawDefault " & nItem & ", font=" & hFontBold
+                                    Else
+                                        SelectObject .hDC, hFont
+                                        'DebugAppend "DrawStd " & nItem
+                                    End If
+                                    CopyMemory ByVal lParam, NMLVCD, LenB(NMLVCD)
+                                    ' lReturn = CDRF_NOTIFYSUBITEMDRAW Or CDRF_NEWFONT
+                                    ' bHandled = True
+                                    zzUCWndProc = CDRF_NEWFONT
+                                    Exit Function
+                                End If
+                        End Select
+                    End With
+            End Select
+        End If
+        
+        
+    Case WM_COMMAND
+        If lParam = hCombo Then
+        Dim lCode As Long
+        lCode = HIWORD(CLng(wParam))
+        Select Case lCode
+            Case CBN_SELCHANGE
+                Dim nIdx As Long
+                Dim nSel As Long
+                nSel = CLng(SendMessage(hCombo, CB_GETCURSEL, 0, ByVal 0))
+                nIdx = -1
+                nIdx = CLng(GetCBXItemlParam(hCombo, nSel))
+                If nIdx >= 0 Then
+                    RaiseEvent PrinterChanged(mPrinters(nIdx).sName, mPrinters(nIdx).sParsingPath, mPrinters(nIdx).sModel, mPrinters(nIdx).sLocation, mPrinters(nIdx).sLastStatus, mPrinters(nIdx).bDefault)
+                End If
+                    
+            Case CBN_DROPDOWN
+                DebugAppend "CBN_DROPDOWN on Parent"
+                zzUCWndProc = 1 'Cancel the actual dropdown.
+                Exit Function
+        End Select
+        End If
+    Case WM_DESTROY
+        Call UnSubclass2(hWnd, PtrUCWndProc, uIdSubclass)
+    
+    End Select
+    zzUCWndProc = DefSubclassProc(hWnd, uMsg, wParam, lParam)
+    If uMsg = WM_SETFOCUS And UCNoSetFocusFwd = False Then SetFocusAPI hCombo
+    Exit Function
+    e0:
+    DebugAppend "UCWndProc->Error: " & Err.Description & ", 0x" & Hex$(Err.Number)
+
+End Function
+
+#If TWINBASIC Then
+Public Function zzLVWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr) As LongPtr
+#Else
+Public Function zzLVWndProc(ByVal hWnd As Long, ByVal uMsg As Long, ByVal wParam As Long, ByVal lParam As Long, ByVal uIdSubclass As Long) As Long
+#End If
+
+Select Case uMsg
+    
+    Case WM_NOTIFYFORMAT
+        zzLVWndProc = NFR_UNICODE
+        Exit Function
+        
+    ' Case OCM_NOTIFY
+    '     DebugAppend "Receiving OCM_NOTIFY"
+    Case WM_KEYDOWN
+        DebugAppend "KeyDown on LVWndProc"
+        
+    Case WM_NOTIFY
+        Dim tNMH As NMHDR
+        CopyMemory tNMH, ByVal lParam, LenB(tNMH)
+        If tNMH.hWndFrom = hLVW Then
+            DebugAppend "Receiving Notify from hLVW in LVWndProc"
+            Select Case tNMH.Code
+                Case NM_KILLFOCUS
+                    If tNMH.hWndFrom = hLVW Then
+                        DebugAppend "NM_KILLFOCUS from LV on LVWndProc"
+                        ShowWindow hLVW, SW_HIDE
+                        SendMessage hLVW, LVM_DELETEALLITEMS, 0, ByVal 0
+                        bLVVis = False
+                        UnhookMouse
+                    End If
+                            
+                Case NM_SETFOCUS
+                    If tNMH.hWndFrom = hLVW Then DebugAppend "NM_SETFOCUS from LV on LVWndProc"
+            End Select
+        End If
+    Case WM_SETFOCUS
+        DebugAppend "WM_SETFOCUS on LVWndProc, hwnd " & hWnd & "|" & hLVW
+
+    Case WM_KILLFOCUS
+        DebugAppend "WM_KILLFOCUS on LVWndProc, hwnd " & hWnd & "|" & hLVW
+        
+    ' Case WM_NCPAINT
+    '     Dim hdc As LongPtr
+    '     hdc = GetDCEx(hWnd, wParam, DCX_WINDOW Or DCX_INTERSECTRGN)
+    '     Dim rc As RECT
+    '     GetClientRect hWnd, rc
+    '     DrawThemeBackground hTheme, hdc, CP_BORDER, CBXS_HOT, rc, vbNullPtr
+        
+    '     ReleaseDC(hWnd, hdc)
+        
+    Case WM_DESTROY
+        Call UnSubclass2(hWnd, PtrLVWndProc, uIdSubclass)
+        
+
+
+End Select
+zzLVWndProc = DefSubclassProc(hWnd, uMsg, wParam, lParam)
+End Function
+
+
+
+End Class
+
+Module mUCPrinterComboExHelper
+    Option Explicit
+    Public gUCPrinterHookInst As ucPrinterComboEx
+    Public gUCPrinterHookWindow As LongPtr
+    Public gUCPrinterHookHandle As LongPtr
+    #If TWINBASIC = 0 Then
+    Private Type MOUSEHOOKSTRUCT
+        pt As POINT
+        hwnd As Long
+        wHitTestCode As Long
+        dwExtraInfo As Long
+    End Type
+    Private Const WM_LBUTTONDBLCLK = &H0203
+    Private Const WM_LBUTTONDOWN = &H0201
+    Private Const WM_MBUTTONDBLCLK = &H0209
+    Private Const WM_MBUTTONDOWN = &H0207
+    Private Const WM_RBUTTONDBLCLK = &H0206
+    Private Const WM_RBUTTONDOWN = &H0204
+    Private Const WM_XBUTTONDBLCLK = &H020D
+    Private Const WM_XBUTTONDOWN = &H020B 
+    Private Declare Function CallNextHookEx Lib "user32" (ByVal hHook As LongPtr, ByVal ncode As Long, ByVal wParam As LongPtr, lParam As Any) As LongPtr
+    Private Declare Function GetParent Lib "user32" (ByVal hWnd As LongPtr) As LongPtr
+    Private Declare Function GetKeyState Lib "user32" (ByVal nVirtKey As VirtualKeyCodes) As Integer
+    
+    #End If
+    Private VTableIPAO(0 To 9) As LongPtr, VTableIPAOData As VTableIPAODataStruct
+    Public Enum VTableInterfaceConstants
+    VTableInterfaceInPlaceActiveObject = 1
+    VTableInterfaceControl = 2
+    VTableInterfacePerPropertyBrowsing = 3
+    End Enum
+    Private Type VTableIPAODataStruct
+    VTable As LongPtr
+    RefCount As Long
+    OriginalIOleIPAO As IOleInPlaceActiveObject
+    IOleIPAO As IOleInPlaceActiveObjectVB
+    End Type
+    Public Function ucPrinterComboWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr, ByVal dwRefData As ucPrinterComboEx) As LongPtr
+        ucPrinterComboWndProc = dwRefData.zzCBWndProc(hWnd, uMsg, wParam, lParam, uIdSubclass)
+    End Function
+    Public Function ucPrinterComboCWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr, ByVal dwRefData As ucPrinterComboEx) As LongPtr
+        ucPrinterComboCWndProc = dwRefData.zzCBCWndProc(hWnd, uMsg, wParam, lParam, uIdSubclass)
+    End Function
+    Public Function ucPrinterComboLBWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr, ByVal dwRefData As ucPrinterComboEx) As LongPtr
+        ucPrinterComboLBWndProc = dwRefData.zzCBLBWndProc(hWnd, uMsg, wParam, lParam, uIdSubclass)
+    End Function
+    Public Function ucPrinterComboEditWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr, ByVal dwRefData As ucPrinterComboEx) As LongPtr
+        ucPrinterComboEditWndProc = dwRefData.zzCBEditWndProc(hWnd, uMsg, wParam, lParam, uIdSubclass)
+    End Function
+    Public Function ucPrinterUserControlWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr, ByVal dwRefData As ucPrinterComboEx) As LongPtr
+        ucPrinterUserControlWndProc = dwRefData.zzUCWndProc(hWnd, uMsg, wParam, lParam, uIdSubclass)
+    End Function
+    Public Function ucPrinterLVWndProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr, ByVal uIdSubclass As LongPtr, ByVal dwRefData As ucPrinterComboEx) As LongPtr
+        ucPrinterLVWndProc = dwRefData.zzLVWndProc(hWnd, uMsg, wParam, lParam, uIdSubclass)
+    End Function
+    Public Function ucPrinterMouseHookProc(ByVal nCode As Long, ByVal wParam As LongPtr, lParam As MOUSEHOOKSTRUCT) As LongPtr
+        If (lParam.hwnd <> gUCPrinterHookWindow) And (GetParent(lParam.hwnd) <> gUCPrinterHookWindow) Then
+            Select Case wParam
+                Case WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, _
+                        WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCMBUTTONDBLCLK, WM_NCMBUTTONDOWN, WM_NCXBUTTONDBLCLK, WM_NCXBUTTONDOWN
+                    gUCPrinterHookInst.CloseDropdown lParam.hwnd
+            End Select
+        End If
+        ucPrinterMouseHookProc = CallNextHookEx(gUCPrinterHookHandle, nCode, wParam, lParam)
+    End Function
+ 
+    
+    
+    Public Function ucPrinterComboSetVTableHandling(ByVal This As Object, ByVal OLEInterface As VTableInterfaceConstants) As Boolean
+    Select Case OLEInterface
+        Case VTableInterfaceInPlaceActiveObject
+            If VTableHandlingSupported(This, VTableInterfaceInPlaceActiveObject) = True Then
+                VTableIPAOData.RefCount = VTableIPAOData.RefCount + 1
+                ucPrinterComboSetVTableHandling = True
+            End If
+        ' Case VTableInterfaceControl
+        '     If VTableHandlingSupported(This, VTableInterfaceControl) = True Then
+        '         Call ReplaceIOleControl(This)
+        '         SetVTableHandling = True
+        '     End If
+        ' Case VTableInterfacePerPropertyBrowsing
+        '     If VTableHandlingSupported(This, VTableInterfacePerPropertyBrowsing) = True Then
+        '         Call ReplaceIPPB(This)
+        '         SetVTableHandling = True
+        '     End If
+    End Select
+    End Function
+    
+    Public Function ucPrinterComboRemoveVTableHandling(ByVal This As Object, ByVal OLEInterface As VTableInterfaceConstants) As Boolean
+    Select Case OLEInterface
+        Case VTableInterfaceInPlaceActiveObject
+            If VTableHandlingSupported(This, VTableInterfaceInPlaceActiveObject) = True Then
+                VTableIPAOData.RefCount = VTableIPAOData.RefCount - 1
+                ucPrinterComboRemoveVTableHandling = True
+            End If
+        ' Case VTableInterfaceControl
+        '     If VTableHandlingSupported(This, VTableInterfaceControl) = True Then
+        '         Call RestoreIOleControl(This)
+        '         RemoveVTableHandling = True
+        '     End If
+        ' Case VTableInterfacePerPropertyBrowsing
+        '     If VTableHandlingSupported(This, VTableInterfacePerPropertyBrowsing) = True Then
+        '         Call RestoreIPPB(This)
+        '         RemoveVTableHandling = True
+        '     End If
+    End Select
+    End Function
+    
+    
+    Private Function VTableHandlingSupported(ByRef This As Object, ByVal OLEInterface As VTableInterfaceConstants) As Boolean
+    On Error GoTo CATCH_EXCEPTION
+    Select Case OLEInterface
+        Case VTableInterfaceInPlaceActiveObject
+            Dim ShadowIOleIPAO As IOleInPlaceActiveObject
+            Dim ShadowIOleInPlaceActiveObjectVB As IOleInPlaceActiveObjectVB
+            Set ShadowIOleIPAO = This
+            Set ShadowIOleInPlaceActiveObjectVB = This
+            VTableHandlingSupported = Not CBool(ShadowIOleIPAO Is Nothing Or ShadowIOleInPlaceActiveObjectVB Is Nothing)
+        ' Case VTableInterfaceControl
+        '     Dim ShadowIOleControl As IOleControl
+        '     Dim ShadowIOleControlVB As IOleControlVB
+        '     Set ShadowIOleControl = This
+        '     Set ShadowIOleControlVB = This
+        '     VTableHandlingSupported = Not CBool(ShadowIOleControl Is Nothing Or ShadowIOleControlVB Is Nothing)
+        ' Case VTableInterfacePerPropertyBrowsing
+        '     Dim ShadowIPPB As IPerPropertyBrowsing
+        '     Dim ShadowIPerPropertyBrowsingVB As IPerPropertyBrowsingVB
+        '     Set ShadowIPPB = This
+        '     Set ShadowIPerPropertyBrowsingVB = This
+        '     VTableHandlingSupported = Not CBool(ShadowIPPB Is Nothing Or ShadowIPerPropertyBrowsingVB Is Nothing)
+    End Select
+    CATCH_EXCEPTION:
+    End Function
+    Public Sub ucPrinterComboActivateIPAO(ByVal This As Object)
+    On Error GoTo CATCH_EXCEPTION
+    Dim PropOleObject As IOleObject
+    Dim PropOleInPlaceSite As IOleInPlaceSite
+    Dim PropOleInPlaceFrame As IOleInPlaceFrame
+    Dim PropOleInPlaceUIWindow As IOleInPlaceUIWindow
+    Dim PropOleInPlaceActiveObject As IOleInPlaceActiveObject
+    Dim PosRect As OLERECT
+    Dim ClipRect As OLERECT
+    Dim FrameInfo As OLEINPLACEFRAMEINFO
+    Set PropOleObject = This
+    If VTableIPAOData.RefCount > 0 Then
+        With VTableIPAOData
+        .VTable = GetVTableIPAO()
+        Set .OriginalIOleIPAO = This
+        Set .IOleIPAO = This
+        End With
+        CopyMemory ByVal VarPtr(PropOleInPlaceActiveObject), VarPtr(VTableIPAOData), LenB(VTableIPAOData.VTable)
+        PropOleInPlaceActiveObject.AddRef
+    Else
+        Set PropOleInPlaceActiveObject = This
+    End If
+    Set PropOleInPlaceSite = PropOleObject.GetClientSite
+    PropOleInPlaceSite.GetWindowContext PropOleInPlaceFrame, PropOleInPlaceUIWindow, VarPtr(PosRect), VarPtr(ClipRect), VarPtr(FrameInfo)
+    PropOleInPlaceFrame.SetActiveObject PropOleInPlaceActiveObject, 0
+    If Not PropOleInPlaceUIWindow Is Nothing Then PropOleInPlaceUIWindow.SetActiveObject PropOleInPlaceActiveObject, 0
+    Exit Sub
+    CATCH_EXCEPTION:
+    Debug.Print "ucPrinterComboActivateIPAO->Error " & Err.Number & ": " & Err.Description
+    End Sub
+
+    Public Sub ucPrinterComboDeActivateIPAO()
+    On Error GoTo CATCH_EXCEPTION
+    If VTableIPAOData.OriginalIOleIPAO Is Nothing Then Exit Sub
+    Dim PropOleObject As IOleObject
+    Dim PropOleInPlaceSite As IOleInPlaceSite
+    Dim PropOleInPlaceFrame As IOleInPlaceFrame
+    Dim PropOleInPlaceUIWindow As IOleInPlaceUIWindow
+    Dim PosRect As OLERECT
+    Dim ClipRect As OLERECT
+    Dim FrameInfo As OLEINPLACEFRAMEINFO
+    Set PropOleObject = VTableIPAOData.OriginalIOleIPAO
+    Set PropOleInPlaceSite = PropOleObject.GetClientSite
+    PropOleInPlaceSite.GetWindowContext PropOleInPlaceFrame, PropOleInPlaceUIWindow, VarPtr(PosRect), VarPtr(ClipRect), VarPtr(FrameInfo)
+    PropOleInPlaceFrame.SetActiveObject Nothing, 0
+    If Not PropOleInPlaceUIWindow Is Nothing Then PropOleInPlaceUIWindow.SetActiveObject Nothing, 0
+    CATCH_EXCEPTION:
+    Set VTableIPAOData.OriginalIOleIPAO = Nothing
+    Set VTableIPAOData.IOleIPAO = Nothing
+    End Sub
+    
+    Private Function ProcPtr(ByVal Address As LongPtr) As LongPtr
+        ProcPtr = Address
+    End Function
+ 
+    Private Function GetVTableIPAO() As LongPtr
+    If VTableIPAO(0) = 0 Then
+        VTableIPAO(0) = ProcPtr(AddressOf IOleIPAO_QueryInterface)
+        VTableIPAO(1) = ProcPtr(AddressOf IOleIPAO_AddRef)
+        VTableIPAO(2) = ProcPtr(AddressOf IOleIPAO_Release)
+        VTableIPAO(3) = ProcPtr(AddressOf IOleIPAO_GetWindow)
+        VTableIPAO(4) = ProcPtr(AddressOf IOleIPAO_ContextSensitiveHelp)
+        VTableIPAO(5) = ProcPtr(AddressOf IOleIPAO_TranslateAccelerator)
+        VTableIPAO(6) = ProcPtr(AddressOf IOleIPAO_OnFrameWindowActivate)
+        VTableIPAO(7) = ProcPtr(AddressOf IOleIPAO_OnDocWindowActivate)
+        VTableIPAO(8) = ProcPtr(AddressOf IOleIPAO_ResizeBorder)
+        VTableIPAO(9) = ProcPtr(AddressOf IOleIPAO_EnableModeless)
+    End If
+    GetVTableIPAO = VarPtr(VTableIPAO(0))
+    End Function
+
+    Private Function IOleIPAO_QueryInterface(ByRef This As VTableIPAODataStruct, ByRef IID As OLECLSID, ByRef pvObj As LongPtr) As Long
+    If VarPtr(pvObj) = 0 Then
+        IOleIPAO_QueryInterface = E_POINTER
+        Exit Function
+    End If
+    ' IID_IOleInPlaceActiveObject = {00000117-0000-0000-C000-000000000046}
+    If IID.Data1 = &H117 And IID.Data2 = &H0 And IID.Data3 = &H0 Then
+        If IID.Data4(0) = &HC0 And IID.Data4(1) = &H0 And IID.Data4(2) = &H0 And IID.Data4(3) = &H0 _
+        And IID.Data4(4) = &H0 And IID.Data4(5) = &H0 And IID.Data4(6) = &H0 And IID.Data4(7) = &H46 Then
+            pvObj = VarPtr(This)
+            IOleIPAO_AddRef This
+            IOleIPAO_QueryInterface = S_OK
+        Else
+            IOleIPAO_QueryInterface = This.OriginalIOleIPAO.QueryInterface(VarPtr(IID), pvObj)
+        End If
+    Else
+        IOleIPAO_QueryInterface = This.OriginalIOleIPAO.QueryInterface(VarPtr(IID), pvObj)
+    End If
+    End Function
+
+    Private Function IOleIPAO_AddRef(ByRef This As VTableIPAODataStruct) As Long
+    IOleIPAO_AddRef = This.OriginalIOleIPAO.AddRef
+    End Function
+
+    Private Function IOleIPAO_Release(ByRef This As VTableIPAODataStruct) As Long
+    IOleIPAO_Release = This.OriginalIOleIPAO.Release
+    End Function
+
+    Private Function IOleIPAO_GetWindow(ByRef This As VTableIPAODataStruct, ByRef hWnd As LongPtr) As Long
+    IOleIPAO_GetWindow = This.OriginalIOleIPAO.GetWindow(hWnd)
+    End Function
+
+    Private Function IOleIPAO_ContextSensitiveHelp(ByRef This As VTableIPAODataStruct, ByVal EnterMode As Long) As Long
+    IOleIPAO_ContextSensitiveHelp = This.OriginalIOleIPAO.ContextSensitiveHelp(EnterMode)
+    End Function
+
+    Private Function IOleIPAO_TranslateAccelerator(ByRef This As VTableIPAODataStruct, ByRef Msg As MSG) As Long
+    Debug.Print "IOleIPAO_TranslateAccelerator"
+    If VarPtr(Msg) = 0 Then
+        IOleIPAO_TranslateAccelerator = E_INVALIDARG
+        Exit Function
+    End If
+    On Error GoTo CATCH_EXCEPTION
+    Dim Handled As Boolean
+    IOleIPAO_TranslateAccelerator = S_OK
+    This.IOleIPAO.TranslateAccelerator Handled, IOleIPAO_TranslateAccelerator, Msg.hWnd, Msg.message, Msg.wParam, Msg.lParam, GetShiftStateFromMsg()
+    If Handled = False Then IOleIPAO_TranslateAccelerator = This.OriginalIOleIPAO.TranslateAccelerator(VarPtr(Msg))
+    Exit Function
+    CATCH_EXCEPTION:
+    Debug.Print "IOleIPAO_TranslateAccelerator->Error " & Err.Number & ": " & Err.Description
+    IOleIPAO_TranslateAccelerator = This.OriginalIOleIPAO.TranslateAccelerator(VarPtr(Msg))
+    End Function
+
+    Private Function IOleIPAO_OnFrameWindowActivate(ByRef This As VTableIPAODataStruct, ByVal Activate As Long) As Long
+    IOleIPAO_OnFrameWindowActivate = This.OriginalIOleIPAO.OnFrameWindowActivate(Activate)
+    End Function
+
+    Private Function IOleIPAO_OnDocWindowActivate(ByRef This As VTableIPAODataStruct, ByVal Activate As Long) As Long
+    IOleIPAO_OnDocWindowActivate = This.OriginalIOleIPAO.OnDocWindowActivate(Activate)
+    End Function
+
+    Private Function IOleIPAO_ResizeBorder(ByRef This As VTableIPAODataStruct, ByRef RC As OLERECT, ByVal UIWindow As IOleInPlaceUIWindow, ByVal FrameWindow As Long) As Long
+    IOleIPAO_ResizeBorder = This.OriginalIOleIPAO.ResizeBorder(VarPtr(RC), UIWindow, FrameWindow)
+    End Function
+
+    Private Function IOleIPAO_EnableModeless(ByRef This As VTableIPAODataStruct, ByVal Enable As Long) As Long
+    IOleIPAO_EnableModeless = This.OriginalIOleIPAO.EnableModeless(Enable)
+    End Function
+    
+    Private Function GetShiftStateFromMsg() As ShiftConstants
+    If GetKeyState(vbKeyShift) < 0 Then GetShiftStateFromMsg = vbShiftMask
+    If GetKeyState(vbKeyControl) < 0 Then GetShiftStateFromMsg = GetShiftStateFromMsg Or vbCtrlMask
+    If GetKeyState(vbKeyMenu) < 0 Then GetShiftStateFromMsg = GetShiftStateFromMsg Or vbAltMask
+    End Function
+End Module
